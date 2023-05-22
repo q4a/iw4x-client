@@ -1,4 +1,4 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
 
 namespace Components
 {
@@ -6,9 +6,9 @@ namespace Components
 
 	bool Flags::HasFlag(const std::string& flag)
 	{
-		Flags::ParseFlags();
+		ParseFlags();
 
-		for (auto entry : Flags::EnabledFlags)
+		for (const auto& entry : EnabledFlags)
 		{
 			if (Utils::String::ToLower(entry) == Utils::String::ToLower(flag))
 			{
@@ -21,21 +21,26 @@ namespace Components
 
 	void Flags::ParseFlags()
 	{
-		static bool flagsParsed = false;
-		if (flagsParsed) return;
-		flagsParsed = true;
+		static auto flagsParsed = false;
+		if (flagsParsed)
+		{
+			return;
+		}
 
+		// Only parse flags once
+		flagsParsed = true;
 		int numArgs;
-		LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &numArgs);
+		auto* const argv = CommandLineToArgvW(GetCommandLineW(), &numArgs);
 
 		if (argv)
 		{
-			for (int i = 0; i < numArgs; ++i)
+			for (auto i = 0; i < numArgs; ++i)
 			{
 				std::wstring wFlag(argv[i]);
 				if (wFlag[0] == L'-')
 				{
-					Flags::EnabledFlags.push_back(std::string(++wFlag.begin(), wFlag.end()));
+					wFlag.erase(wFlag.begin());
+					EnabledFlags.emplace_back(Utils::String::Convert(wFlag));
 				}
 			}
 
@@ -43,19 +48,9 @@ namespace Components
 		}
 
 		// Workaround for wine
-		if (Utils::IsWineEnvironment() && Dedicated::IsEnabled() && !Flags::HasFlag("console") && !Flags::HasFlag("stdout"))
+		if (Utils::IsWineEnvironment() && Dedicated::IsEnabled() && !HasFlag("console") && !HasFlag("stdout"))
 		{
-			Flags::EnabledFlags.push_back("stdout");
+			EnabledFlags.emplace_back("stdout");
 		}
-	}
-
-	Flags::Flags()
-	{
-		Flags::ParseFlags();
-	}
-
-	Flags::~Flags()
-	{
-		Flags::EnabledFlags.clear();
 	}
 }

@@ -7,24 +7,24 @@ namespace Components
 	public:
 		enum PlayerDataType
 		{
-			ENUM_FEATURES,
-			ENUM_WEAPONS,
-			ENUM_ATTACHEMENTS,
-			ENUM_CHALLENGES,
-			ENUM_CAMOS,
-			ENUM_PERKS,
-			ENUM_KILLSTREAKS,
-			ENUM_ACCOLADES,
-			ENUM_CARDICONS,
-			ENUM_CARDTITLES,
-			ENUM_CARDNAMEPLATES,
-			ENUM_TEAMS,
-			ENUM_GAMETYPES,
-			ENUM_MAX
+			FEATURES,
+			WEAPONS,
+			ATTACHEMENTS,
+			CHALLENGES,
+			CAMOS,
+			PERKS,
+			KILLSTREAKS,
+			ACCOLADES,
+			CARDICONS,
+			CARDTITLES,
+			CARDNAMEPLATES,
+			TEAMS,
+			GAMETYPES,
+
+			COUNT
 		};
 
 		StructuredData();
-		~StructuredData();
 
 	private:
 		static bool UpdateVersionOffsets(Game::StructuredDataDefSet *set, Game::StructuredDataBuffer *buffer, Game::StructuredDataDef *oldDef);
@@ -35,6 +35,6 @@ namespace Components
 		static void PatchCustomClassLimit(Game::StructuredDataDef* data, int count);
 		static Utils::Memory::Allocator MemAllocator;
 
-		static const char* EnumTranslation[ENUM_MAX];
+		static const char* EnumTranslation[COUNT];
 	};
 }

@@ -1,18 +1,26 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include <Utils/Compression.hpp>
+#include <Utils/InfoString.hpp>
+
+#include <proto/node.pb.h>
+
+#include "Node.hpp"
+#include "ServerList.hpp"
+#include "Session.hpp"
 
 namespace Components
 {
 	std::recursive_mutex Node::Mutex;
 	std::vector<Node::Entry> Node::Nodes;
 
-	bool Node::wasIngame = false;
+	bool Node::WasIngame = false;
 
-	bool Node::Entry::isValid()
+	bool Node::Entry::isValid() const
 	{
 		return (this->lastResponse.has_value() && !this->lastResponse->elapsed(NODE_HALFLIFE * 2));
 	}
 
-	bool Node::Entry::isDead()
+	bool Node::Entry::isDead() const
 	{
 		if (!this->lastResponse.has_value())
 		{
@@ -21,7 +29,7 @@ namespace Components
 				return true;
 			}
 		}
-		else if(this->lastResponse->elapsed(NODE_HALFLIFE * 2) && this->lastRequest.has_value() && this->lastRequest->after(*this->lastResponse))
+		else if (this->lastResponse->elapsed(NODE_HALFLIFE * 2) && this->lastRequest.has_value() && this->lastRequest->after(*this->lastResponse))
 		{
 			return true;
 		}
@@ -29,7 +37,7 @@ namespace Components
 		return false;
 	}
 
-	bool Node::Entry::requiresRequest()
+	bool Node::Entry::requiresRequest() const
 	{
 		return (!this->isDead() && (!this->lastRequest.has_value() || this->lastRequest->elapsed(NODE_HALFLIFE)));
 	}
@@ -41,7 +49,9 @@ namespace Components
 
 		Session::Send(this->address, "nodeListRequest");
 		Node::SendList(this->address);
-		NODE_LOG("Sent request to %s\n", this->address.getCString());
+#ifdef NODE_SYSTEM_DEBUG
+		Logger::Debug("Sent request to {}", this->address.getString());
+#endif
 	}
 
 	void Node::Entry::reset()
@@ -50,41 +60,14 @@ namespace Components
 		this->lastRequest.reset();
 	}
 
-	json11::Json Node::Entry::to_json() const
-	{
-		return this->address.getString();
-	}
-
-	void Node::LoadNodeRemotePreset()
-	{
-		std::string nodes = Utils::Cache::GetFile("/iw4/nodes.txt");
-		if (nodes.empty()) return;
-
-		auto nodeList = Utils::String::Explode(nodes, '\n');
-		for (auto& node : nodeList)
-		{
-			Utils::String::Replace(node, "\r", "");
-			node = Utils::String::Trim(node);
-			Node::Add(node);
-		}
-	}
-
 	void Node::LoadNodePreset()
 	{
 		Proto::Node::List list;
 
-		if (Monitor::IsEnabled())
-		{
-			std::string nodes = Utils::IO::ReadFile("players/nodes_default.dat");
-			if (nodes.empty() || !list.ParseFromString(Utils::Compression::ZLib::Decompress(nodes))) return;
-		}
-		else
-		{
-			FileSystem::File defaultNodes("nodes_default.dat");
-			if (!defaultNodes.exists() || !list.ParseFromString(Utils::Compression::ZLib::Decompress(defaultNodes.getBuffer()))) return;
-		}
+		FileSystem::File defaultNodes("nodes_default.dat");
+		if (!defaultNodes.exists() || !list.ParseFromString(Utils::Compression::ZLib::Decompress(defaultNodes.getBuffer()))) return;
 
-		for (int i = 0; i < list.nodes_size(); ++i)
+		for (auto i = 0; i < list.nodes_size(); ++i)
 		{
 			const std::string& addr = list.nodes(i);
 
@@ -114,7 +97,7 @@ namespace Components
 
 	void Node::StoreNodes(bool force)
 	{
-		if (Dedicated::IsEnabled() && Dvar::Var("sv_lanOnly").get<bool>()) return;
+		if (Dedicated::IsEnabled() && Dedicated::SVLanOnly.get<bool>()) return;
 
 		static Utils::Time::Interval interval;
 		if (!force && !interval.elapsed(1min)) return;
@@ -146,7 +129,7 @@ namespace Components
 
 		if (!address.isValid()) return;
 
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 		for (auto& session : Node::Nodes)
 		{
 			if (session.address == address) return;
@@ -160,22 +143,27 @@ namespace Components
 
 	std::vector<Node::Entry> Node::GetNodes()
 	{
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 
 		return Node::Nodes;
 	}
 
 	void Node::RunFrame()
 	{
-		if (Dedicated::IsEnabled() && Dvar::Var("sv_lanOnly").get<bool>()) return;
+		if (Dedicated::IsEnabled() && Dedicated::SVLanOnly.get<bool>()) return;
 
-		if (!Dedicated::IsEnabled() && *Game::clcState > 0)
+		if (!Dedicated::IsEnabled())
 		{
-			wasIngame = true;
-			return; // don't run while ingame because it can still cause lag spikes on lower end PCs
+			if (ServerList::UseMasterServer) return; // don't run node frame if master server is active
+
+			if (Game::CL_GetLocalClientConnectionState(0) != Game::CA_DISCONNECTED)
+			{
+				WasIngame = true;
+				return; // don't run while in-game because it can still cause lag spikes on lower end PCs
+			}
 		}
 
-		if (wasIngame) // our last frame we were ingame and now we aren't so touch all nodes
+		if (WasIngame) // our last frame we were in-game and now we aren't so touch all nodes
 		{
 			for (auto i = Node::Nodes.begin(); i != Node::Nodes.end();++i)
 			{
@@ -184,7 +172,8 @@ namespace Components
 				i->lastRequest.reset();
 				i->lastResponse.reset();
 			}
-			wasIngame = false;
+
+			WasIngame = false;
 		}
 
 		static Utils::Time::Interval frameLimit;
@@ -192,7 +181,7 @@ namespace Components
 		if (!frameLimit.elapsed(std::chrono::milliseconds(interval))) return;
 		frameLimit.update();
 
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 		Dvar::Var queryLimit("net_serverQueryLimit");
 
 		int sentRequests = 0;
@@ -203,7 +192,7 @@ namespace Components
 				i = Node::Nodes.erase(i);
 				continue;
 			}
-			else if (sentRequests < queryLimit.get<int>() && i->requiresRequest())
+			if (sentRequests < queryLimit.get<int>() && i->requiresRequest())
 			{
 				++sentRequests;
 				i->sendRequest();
@@ -215,7 +204,7 @@ namespace Components
 
 	void Node::Synchronize()
 	{
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 		for (auto& node : Node::Nodes)
 		{
 			//if (node.isValid()) // Comment out to simulate 'syncnodes' behaviour
@@ -230,9 +219,11 @@ namespace Components
 		Proto::Node::List list;
 		if (!list.ParseFromString(data)) return;
 
-		NODE_LOG("Received response from %s\n", address.getCString());
+#ifdef NODE_SYSTEM_DEBUG
+		Logger::Debug("Received response from {}", address.getString());
+#endif
 
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 
 		for (int i = 0; i < list.nodes_size(); ++i)
 		{
@@ -246,14 +237,18 @@ namespace Components
 
 		if (list.isnode() && (!list.port() || list.port() == address.getPort()))
 		{
-			if (!Dedicated::IsEnabled() && ServerList::IsOnlineList() && list.protocol() == PROTOCOL)
+			if (!Dedicated::IsEnabled() && ServerList::IsOnlineList() && !ServerList::UseMasterServer && list.protocol() == PROTOCOL)
 			{
-				NODE_LOG("Inserting %s into the serverlist\n", address.getCString());
+#ifdef NODE_SYSTEM_DEBUG
+				Logger::Debug("Inserting {} into the serverlist", address.getString());
+#endif
 				ServerList::InsertRequest(address);
 			}
 			else
 			{
-				NODE_LOG("Dropping serverlist insertion for %s\n", address.getCString());
+#ifdef NODE_SYSTEM_DEBUG
+				Logger::Debug("Dropping serverlist insertion for {}", address.getString());
+#endif
 			}
 
 			for (auto& node : Node::Nodes)
@@ -277,21 +272,21 @@ namespace Components
 		}
 	}
 
-	void Node::SendList(Network::Address address)
+	void Node::SendList(const Network::Address& address)
 	{
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 
 		// need to keep the message size below 1404 bytes else recipient will just drop it
 		std::vector<std::string> nodeListReponseMessages;
 
-		for (size_t curNode = 0; curNode < Node::Nodes.size();)
+		for (std::size_t curNode = 0; curNode < Node::Nodes.size();)
 		{
 			Proto::Node::List list;
 			list.set_isnode(Dedicated::IsEnabled());
 			list.set_protocol(PROTOCOL);
 			list.set_port(Node::GetPort());
 
-			for (size_t i = 0; i < NODE_MAX_NODES_TO_SEND;)
+			for (std::size_t i = 0; i < NODE_MAX_NODES_TO_SEND;)
 			{
 				if (curNode >= Node::Nodes.size())
 					break;
@@ -312,14 +307,16 @@ namespace Components
 			nodeListReponseMessages.push_back(list.SerializeAsString());
 		}
 
-		size_t i = 0;
-		for (auto& nodeListData : nodeListReponseMessages)
+		auto i = 0;
+		for (const auto& nodeListData : nodeListReponseMessages)
 		{
-			Scheduler::OnDelay([nodeListData, i, address]()
+			Scheduler::Once([=]
 			{
-				NODE_LOG("Sending %d nodeListResponse length to %s\n", nodeListData.length(), address.getCString());
+#ifdef NODE_SYSTEM_DEBUG
+				Logger::Debug("Sending {} nodeListResponse length to {}\n", nodeListData.length(), address.getCString());
+#endif
 				Session::Send(address, "nodeListResponse", nodeListData);
-			}, NODE_SEND_RATE * i++);
+			}, Scheduler::Pipeline::MAIN, NODE_SEND_RATE * i++);
 		}
 	}
 
@@ -334,57 +331,53 @@ namespace Components
 		if (ZoneBuilder::IsEnabled()) return;
 		Dvar::Register<bool>("net_natFix", false, 0, "Fix node registration for certain firewalls/routers");
 
-		Scheduler::OnFrameAsync([]()
+		Scheduler::Loop([]
 		{
 			Node::StoreNodes(false);
-		});
+		}, Scheduler::Pipeline::ASYNC);
 
-		Scheduler::OnFrame(Node::RunFrame);
+		Scheduler::Loop(Node::RunFrame, Scheduler::Pipeline::MAIN);
+
 		Session::Handle("nodeListResponse", Node::HandleResponse);
-		Session::Handle("nodeListRequest", [](Network::Address address, const std::string&)
+		Session::Handle("nodeListRequest", [](const Network::Address& address, [[maybe_unused]] const std::string& data)
 		{
 			Node::SendList(address);
 		});
 
 		// Load stored nodes
-		auto loadNodes = []()
+		auto loadNodes = []
 		{
 			Node::LoadNodePreset();
 			Node::LoadNodes();
 		};
 
-		if (Monitor::IsEnabled()) Network::OnStart(loadNodes);
-		else Dvar::OnInit(loadNodes);
+		Scheduler::OnGameInitialized(loadNodes, Scheduler::Pipeline::MAIN);
 
-		Network::OnStart([]()
+		Command::Add("listnodes", [](const Command::Params*)
 		{
-			std::thread([]()
-			{
-				Node::LoadNodeRemotePreset();
-			}).detach();
-		});
+			Logger::Print("Nodes: {}\n", Node::Nodes.size());
 
-		Command::Add("listnodes", [](Command::Params*)
-		{
-			Logger::Print("Nodes: %d\n", Node::Nodes.size());
-
-			std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+			std::lock_guard _(Node::Mutex);
 			for (auto& node : Node::Nodes)
 			{
-				Logger::Print("%s\t(%s)\n", node.address.getCString(), node.isValid() ? "Valid" : "Invalid");
+				Logger::Print("{}\t({})\n", node.address.getString(), node.isValid() ? "Valid" : "Invalid");
 			}
 		});
 
-		Command::Add("addnode", [](Command::Params* params)
+		Command::Add("addnode", [](const Command::Params* params)
 		{
-			if (params->length() < 2) return;
-			Node::Add({ params->get(1) });
+			if (params->size() < 2) return;
+			auto address = Network::Address{ params->get(1) };
+			if (address.isValid())
+			{
+				Node::Add(address);
+			}
 		});
 	}
 
 	Node::~Node()
 	{
-		std::lock_guard<std::recursive_mutex> _(Node::Mutex);
+		std::lock_guard _(Node::Mutex);
 		Node::StoreNodes(true);
 		Node::Nodes.clear();
 	}

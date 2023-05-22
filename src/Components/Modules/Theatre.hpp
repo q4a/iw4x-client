@@ -20,22 +20,15 @@ namespace Components
 			int length;
 			std::time_t timeStamp;
 
-			json11::Json to_json() const
-			{
-				return json11::Json::object
-				{
-					{ "mapname", mapname },
-					{ "gametype", gametype },
-					{ "author", author },
-					{ "length", length },
-					{ "timestamp", Utils::String::VA("%lld", timeStamp) } //Ugly, but prevents information loss
-				};
-			}
+			[[nodiscard]] nlohmann::json to_json() const;
 		};
 
 		static DemoInfo CurrentInfo;
 		static unsigned int CurrentSelection;
 		static std::vector<DemoInfo> Demos;
+
+		static Dvar::Var CLAutoRecord;
+		static Dvar::Var CLDemosKeep;
 
 		static char BaselineSnapshot[131072];
 		static int BaselineSnapshotMsgLen;
@@ -44,9 +37,9 @@ namespace Components
 		static void WriteBaseline();
 		static void StoreBaseline(PBYTE snapshotMsg);
 
-		static void LoadDemos(UIScript::Token);
-		static void DeleteDemo(UIScript::Token);
-		static void PlayDemo(UIScript::Token);
+		static void LoadDemos([[maybe_unused]] const UIScript::Token& token, [[maybe_unused]] const Game::uiInfo_s* info);
+		static void DeleteDemo([[maybe_unused]] const UIScript::Token& token, [[maybe_unused]] const Game::uiInfo_s* info);
+		static void PlayDemo([[maybe_unused]] const UIScript::Token& token, [[maybe_unused]] const Game::uiInfo_s* info);
 
 		static unsigned int GetDemoCount();
 		static const char* GetDemoText(unsigned int item, int column);
@@ -60,9 +53,11 @@ namespace Components
 		static void ServerTimedOutStub();
 		static void UISetActiveMenuStub();
 
-		static uint32_t InitCGameStub();
-		static void MapChangeStub();
-		static void MapChangeSVStub(char* a1, char* a2);
+		static int CL_FirstSnapshot_Stub();
+		static void SV_SpawnServer_Stub();
+
+		static void CG_CompassDrawPlayerMapLocationSelector_Stub(int localClientNum, Game::CompassType compassType, const Game::rectDef_s* parentRect, const Game::rectDef_s* rect, Game::Material* material, float* color);
+		static void CL_WriteDemoClientArchive_Hk(void(*write)(const void* buffer, int len, int localClientNum), const Game::playerState_s* ps, const float* viewangles, const float* selectedLocation, float selectedLocationAngle, int localClientNum, int index);
 
 		static void RecordStub(int channel, char* message, char* file);
 		static void StopRecordStub(int channel, char* message);

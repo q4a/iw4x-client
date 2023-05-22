@@ -1,144 +1,58 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "IMaterialTechniqueSet.hpp"
 
-#define IW4X_TECHSET_VERSION "0"
+#define IW4X_TECHSET_VERSION 1
 
 namespace Assets
 {
-    void IMaterialTechniqueSet::load(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* builder)
-    {
-        if (!header->data) this->loadNative(header, name, builder); // Check if there is a native one
-        if (!header->data) this->loadBinary(header, name, builder); // Check if we need to import a new one into the game
-    }
+	void IMaterialTechniqueSet::load(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* builder)
+	{
+		if (!header->data) this->loadFromDisk(header, name, builder); // Check if we need to import a new one into the game
+		if (!header->data) this->loadNative(header, name, builder); // Check if there is a native one
 
-    void IMaterialTechniqueSet::loadNative(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* /*builder*/)
-    {
-        header->techniqueSet = Components::AssetHandler::FindOriginalAsset(this->getType(), name.data()).techniqueSet;
-    }
+		if (!header->data)
+		{
+			AssertUnreachable;
+		}
+	}
 
-    void IMaterialTechniqueSet::loadBinaryTechnique(Game::MaterialTechnique** tech, const std::string& name, Components::ZoneBuilder::Zone* builder)
-    {
-        AssertSize(Game::MaterialPass, 20);
+	void IMaterialTechniqueSet::loadNative(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* /*builder*/)
+	{
+		header->techniqueSet = Components::AssetHandler::FindOriginalAsset(this->getType(), name.data()).techniqueSet;
+	}
 
-        Components::FileSystem::File techFile(Utils::String::VA("techniques/%s.iw4xTech", name.data()));
-        if (!techFile.exists()) {
-            *tech = nullptr;
-            Components::Logger::Print("Warning: Missing technique '%s'\n", name.data());
-            return;
-        }
+	void IMaterialTechniqueSet::loadFromDisk(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* builder)
+	{
+		header->techniqueSet = builder->getIW4OfApi()->read<Game::MaterialTechniqueSet>(Game::ASSET_TYPE_TECHNIQUE_SET, name);
 
-        Utils::Stream::Reader reader(builder->getAllocator(), techFile.getBuffer());
+		auto ptr = header->techniqueSet;
+		if (ptr)
+		{
+			while (ptr->remappedTechniqueSet && ptr->remappedTechniqueSet != ptr)
+			{
+				ptr = ptr->remappedTechniqueSet;
+				builder->loadAsset(Game::ASSET_TYPE_TECHNIQUE_SET, ptr, false);
 
-        char* magic = reader.readArray<char>(8);
-        if (std::memcmp(magic, "IW4xTECH", 8))
-        {
-            Components::Logger::Error(0, "Reading technique '%s' failed, header is invalid!", name.data());
-        }
-
-        std::string version;
-        version.push_back(reader.read<char>());
-        if (version != IW4X_TECHSET_VERSION)
-        {
-            Components::Logger::Error("Reading technique '%s' failed, expected version is %d, but it was %d!", name.data(), atoi(IW4X_TECHSET_VERSION), atoi(version.data()));
-        }
-
-        unsigned short flags = reader.read<unsigned short>();
-        unsigned short passCount = reader.read<unsigned short>();
-
-        Game::MaterialTechnique* asset = (Game::MaterialTechnique*)builder->getAllocator()->allocateArray<unsigned char>(sizeof(Game::MaterialTechnique) + (sizeof(Game::MaterialPass) * (passCount - 1)));
-
-        asset->name = builder->getAllocator()->duplicateString(name);
-        asset->flags = flags;
-        asset->passCount = passCount;
-
-        Game::MaterialPass* passes = reader.readArray<Game::MaterialPass>(passCount);
-        std::memcpy(asset->passArray, passes, sizeof(Game::MaterialPass) * passCount);
-
-        for (unsigned short i = 0; i < asset->passCount; i++)
-        { 
-            Game::MaterialPass* pass = &asset->passArray[i];
-
-            if (pass->vertexDecl)
-            {
-                const char* declName = reader.readCString();
-                pass->vertexDecl = Components::AssetHandler::FindAssetForZone(Game::XAssetType::ASSET_TYPE_VERTEXDECL, declName, builder).vertexDecl;
-            }
-
-            if (pass->vertexShader)
-            {
-                const char* vsName = reader.readCString();
-                pass->vertexShader = Components::AssetHandler::FindAssetForZone(Game::XAssetType::ASSET_TYPE_VERTEXSHADER, vsName, builder).vertexShader;
-
-            }
-
-            if (pass->pixelShader)
-            {
-                const char* psName = reader.readCString();
-                pass->pixelShader = Components::AssetHandler::FindAssetForZone(Game::XAssetType::ASSET_TYPE_PIXELSHADER, psName, builder).pixelShader;
-            }
-
-            pass->args = reader.readArray<Game::MaterialShaderArgument>(pass->perPrimArgCount + pass->perObjArgCount + pass->stableArgCount);
-
-            for (int j = 0; j < pass->perPrimArgCount + pass->perObjArgCount + pass->stableArgCount; j++)
-            {
-                if (pass->args[j].type == 1 || pass->args[j].type == 7)
-                {
-                    pass->args[j].u.literalConst = reader.readArray<float>(4);
-                }
-
-                if (pass->args[j].type == 3 || pass->args[j].type == 5)
-                {
-                    pass->args[j].u.codeConst.index = *reader.readObject<unsigned short>();
-                    pass->args[j].u.codeConst.firstRow = *reader.readObject<unsigned char>();
-                    pass->args[j].u.codeConst.rowCount = *reader.readObject<unsigned char>();
-                }
-            }
-        }
-
-        *tech = asset;
-    }
-
-    void IMaterialTechniqueSet::loadBinary(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* builder)
-    {
-        Components::FileSystem::File tsFile(Utils::String::VA("techsets/%s.iw4xTS", name.data()));
-        if (!tsFile.exists()) return;
-
-        Utils::Stream::Reader reader(builder->getAllocator(), tsFile.getBuffer());
-
-        char* magic = reader.readArray<char>(8);
-        if (std::memcmp(magic, "IW4xTSET", 8))
-        {
-            Components::Logger::Error(0, "Reading techset '%s' failed, header is invalid!", name.data());
-        }
-
-        std::string version;
-        version.push_back(reader.read<char>());
-        if (version != IW4X_TECHSET_VERSION)
-        {
-            Components::Logger::Error("Reading techset '%s' failed, expected version is %d, but it was %d!", name.data(), atoi(IW4X_TECHSET_VERSION), atoi(version.data()));
-        }
-
-        Game::MaterialTechniqueSet* asset = reader.readObject<Game::MaterialTechniqueSet>();
-
-        if (asset->name)
-        {
-            asset->name = reader.readCString();
-        }
-
-        for (int i = 0; i < 48; i++)
-        {
-            if (asset->techniques[i])
-            {
-                const char* techName = reader.readCString();
-                this->loadBinaryTechnique(&asset->techniques[i], techName, builder);
-            }
-        }
-
-
-        header->techniqueSet = asset;
-    }
+				for (size_t i = 0; i < Game::TECHNIQUE_COUNT; i++)
+				{
+					const auto technique = ptr->techniques[i];
+					if (technique)
+					{
+						for (size_t j = 0; j < technique->passCount; j++)
+						{
+							const auto pass = &technique->passArray[j];
+							builder->loadAsset(Game::ASSET_TYPE_VERTEXDECL, pass->vertexDecl, true);
+							builder->loadAsset(Game::ASSET_TYPE_PIXELSHADER, pass->pixelShader, true);
+							builder->loadAsset(Game::ASSET_TYPE_VERTEXSHADER, pass->vertexShader, true);
+						}
+					}
+				}
+			}
+		}
+	}
 
 	void IMaterialTechniqueSet::mark(Game::XAssetHeader header, Components::ZoneBuilder::Zone* builder)
-	{ 
+	{
 		Game::MaterialTechniqueSet* asset = header.techniqueSet;
 
 		for (int i = 0; i < ARRAYSIZE(Game::MaterialTechniqueSet::techniques); ++i)
@@ -174,8 +88,10 @@ namespace Assets
 		AssertSize(Game::MaterialTechniqueSet, 204);
 
 		Utils::Stream* buffer = builder->getBuffer();
+
 		Game::MaterialTechniqueSet* asset = header.techniqueSet;
 		Game::MaterialTechniqueSet* dest = buffer->dest<Game::MaterialTechniqueSet>();
+
 		buffer->save(asset);
 
 		buffer->pushBlock(Game::XFILE_BLOCK_VIRTUAL);

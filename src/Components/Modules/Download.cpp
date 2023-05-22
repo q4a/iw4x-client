@@ -1,59 +1,80 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include <Utils/InfoString.hpp>
+#include <Utils/WebIO.hpp>
+
+#include "Download.hpp"
+#include "Events.hpp"
+#include "MapRotation.hpp"
+#include "Party.hpp"
+#include "ServerInfo.hpp"
+
+#include <mongoose.h>
+
+#define MG_OVERRIDE_LOG_FN
 
 namespace Components
 {
-	mg_mgr Download::Mgr;
+	static mg_mgr Mgr;
+
+	Dvar::Var Download::SV_wwwDownload;
+	Dvar::Var Download::SV_wwwBaseUrl;
+
+	Dvar::Var Download::UIDlTimeLeft;
+	Dvar::Var Download::UIDlProgress;
+	Dvar::Var Download::UIDlTransRate;
+
 	Download::ClientDownload Download::CLDownload;
-	std::vector<std::shared_ptr<Download::ScriptDownload>> Download::ScriptDownloads;
 
 	std::thread Download::ServerThread;
-	bool Download::Terminate;
-    bool Download::ServerRunning;
+	volatile bool Download::Terminate;
+	bool Download::ServerRunning;
+
+	std::string Download::MongooseLogBuffer;
 
 #pragma region Client
 
 	void Download::InitiateMapDownload(const std::string& map, bool needPassword)
 	{
-		Download::InitiateClientDownload(map, needPassword, true);
+		InitiateClientDownload(map, needPassword, true);
 	}
 
 	void Download::InitiateClientDownload(const std::string& mod, bool needPassword, bool map)
 	{
-		if (Download::CLDownload.running) return;
+		if (CLDownload.running) return;
 
-		Scheduler::Once([]()
+		Scheduler::Once([]
 		{
-			Dvar::Var("ui_dl_timeLeft").set(Utils::String::FormatTimeSpan(0));
-			Dvar::Var("ui_dl_progress").set("(0/0) %");
-			Dvar::Var("ui_dl_transRate").set("0.0 MB/s");
-		});
+			UIDlTimeLeft.set(Utils::String::FormatTimeSpan(0));
+			UIDlProgress.set("(0/0) %");
+			UIDlTransRate.set("0.0 MB/s");
+		}, Scheduler::Pipeline::MAIN);
 
 		Command::Execute("openmenu mod_download_popmenu", false);
 
 		if (needPassword)
 		{
-			std::string pass = Dvar::Var("password").get<std::string>();
-			if (pass.empty())
+			const auto password = Dvar::Var("password").get<std::string>();
+			if (password.empty())
 			{
 				// shouldn't ever happen but this is safe
 				Party::ConnectError("A password is required to connect to this server!");
 				return;
 			}
 
-			Download::CLDownload.hashedPassword = Utils::String::DumpHex(Utils::Cryptography::SHA256::Compute(pass), "");
+			CLDownload.hashedPassword = Utils::String::DumpHex(Utils::Cryptography::SHA256::Compute(password), "");
 		}
 
-		Download::CLDownload.running = true;
-		Download::CLDownload.isMap = map;
-		Download::CLDownload.mod = mod;
-		Download::CLDownload.terminateThread = false;
-		Download::CLDownload.totalBytes = 0;
-		Download::CLDownload.lastTimeStamp = 0;
-		Download::CLDownload.downBytes = 0;
-		Download::CLDownload.timeStampBytes = 0;
-		Download::CLDownload.isPrivate = needPassword;
-		Download::CLDownload.target = Party::Target();
-		Download::CLDownload.thread = std::thread(Download::ModDownloader, &Download::CLDownload);
+		CLDownload.running = true;
+		CLDownload.isMap = map;
+		CLDownload.mod = mod;
+		CLDownload.terminateThread = false;
+		CLDownload.totalBytes = 0;
+		CLDownload.lastTimeStamp = 0;
+		CLDownload.downBytes = 0;
+		CLDownload.timeStampBytes = 0;
+		CLDownload.isPrivate = needPassword;
+		CLDownload.target = Party::Target();
+		CLDownload.thread = std::thread(ModDownloader, &CLDownload);
 	}
 
 	bool Download::ParseModList(ClientDownload* download, const std::string& list)
@@ -61,75 +82,54 @@ namespace Components
 		if (!download) return false;
 		download->files.clear();
 
-		std::string error;
-		json11::Json listData = json11::Json::parse(list, error);
-
-		if (!error.empty() || !listData.is_array())
+		nlohmann::json listData;
+		try
 		{
-			Logger::Print("Error: %s\n", error.data());
+			listData = nlohmann::json::parse(list);
+		}
+		catch (const nlohmann::json::parse_error& ex)
+		{
+			Logger::PrintError(Game::CON_CHANNEL_ERROR, "JSON Parse Error: {}\n", ex.what());
+			return false;
+		}
+
+		if (!listData.is_array())
+		{
 			return false;
 		}
 
 		download->totalBytes = 0;
+		const nlohmann::json::array_t listDataArray = listData;
 
-		for (auto& file : listData.array_items())
+		for (auto& file : listDataArray)
 		{
 			if (!file.is_object()) return false;
 
-			auto hash = file["hash"];
-			auto name = file["name"];
-			auto size = file["size"];
-
-			if (!hash.is_string() || !name.is_string() || !size.is_number()) return false;
-
-			Download::ClientDownload::File fileEntry;
-			fileEntry.name = name.string_value();
-			fileEntry.hash = hash.string_value();
-			fileEntry.size = static_cast<size_t>(size.number_value());
-
-			if (!fileEntry.name.empty())
+			try
 			{
-				download->files.push_back(fileEntry);
-				download->totalBytes += fileEntry.size;
+				const auto hash = file.at("hash").get<std::string>();
+				const auto name = file.at("name").get<std::string>();
+				const auto size = file.at("size").get<std::size_t>();
+
+				ClientDownload::File fileEntry;
+				fileEntry.name = name;
+				fileEntry.hash = hash;
+				fileEntry.size = size;
+
+				if (!fileEntry.name.empty())
+				{
+					download->files.push_back(fileEntry);
+					download->totalBytes += fileEntry.size;
+				}
+			}
+			catch (const nlohmann::json::exception& ex)
+			{
+				Logger::PrintError(Game::CON_CHANNEL_ERROR, "JSON Error: {}\n", ex.what());
+				return false;
 			}
 		}
 
 		return true;
-	}
-
-	void Download::DownloadHandler(mg_connection *nc, int ev, void* ev_data)
-	{
-		http_message* hm = reinterpret_cast<http_message*>(ev_data);
-		Download::FileDownload* fDownload = reinterpret_cast<Download::FileDownload*>(nc->mgr->user_data);
-
-		if (ev == MG_EV_CONNECT)
-		{
-			if (hm->message.p)
-			{
-				fDownload->downloading = true;
-				return;
-			}
-		}
-
-		if (ev == MG_EV_CLOSE)
-		{
-			fDownload->downloading = false;
-			return;
-		}
-
-		if (ev == MG_EV_RECV)
-		{
-			size_t bytes = static_cast<size_t>(*reinterpret_cast<int*>(ev_data));
-			Download::DownloadProgress(fDownload, bytes);
-		}
-
-		if (ev == MG_EV_HTTP_REPLY)
-		{
-			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-			fDownload->buffer = std::string(hm->body.p, hm->body.len);
-			fDownload->downloading = false;
-			return;
-		}
 	}
 
 	bool Download::DownloadFile(ClientDownload* download, unsigned int index)
@@ -138,7 +138,7 @@ namespace Components
 
 		auto file = download->files[index];
 
-		std::string path = download->mod + "/" + file.name;
+		auto path = download->mod + "/" + file.name;
 		if (download->isMap)
 		{
 			path = "usermaps/" + path;
@@ -146,8 +146,7 @@ namespace Components
 
 		if (Utils::IO::FileExists(path))
 		{
-			std::string data = Utils::IO::ReadFile(path);
-
+			auto data = Utils::IO::ReadFile(path);
 			if (data.size() == file.size && Utils::String::DumpHex(Utils::Cryptography::SHA256::Compute(data), "") == file.hash)
 			{
 				download->totalBytes += file.size;
@@ -155,22 +154,23 @@ namespace Components
 			}
 		}
 
-		std::string host = "http://" + download->target.getString();
-		std::string fastHost = Dvar::Var("sv_wwwBaseUrl").get<std::string>();
+		auto host = "http://" + download->target.getString();
+		auto fastHost = SV_wwwBaseUrl.get<std::string>();
 		if (Utils::String::StartsWith(fastHost, "https://"))
 		{
 			download->thread.detach();
 			download->clear();
 
-			Scheduler::Once([]()
+			Scheduler::Once([]
 			{
 				Command::Execute("closemenu mod_download_popmenu");
 				Party::ConnectError("HTTPS not supported for downloading!");
-			});
+			}, Scheduler::Pipeline::CLIENT);
 
-			return 0;
+			return false;
 		}
-		else if (!Utils::String::StartsWith(fastHost, "http://"))
+
+		if (!Utils::String::StartsWith(fastHost, "http://"))
 		{
 			fastHost = "http://" + fastHost;
 		}
@@ -190,7 +190,7 @@ namespace Components
 		//    -mod.ff
 		//  /-mod2
 		//     ...
-		if (Dvar::Var("sv_wwwDownload").get<bool>())
+		if (SV_wwwDownload.get<bool>())
 		{
 			if (!Utils::String::EndsWith(fastHost, "/")) fastHost.append("/");
 			url = fastHost + path;
@@ -201,9 +201,9 @@ namespace Components
 				+ (download->isPrivate ? ("?password=" + download->hashedPassword) : "");
 		}
 
-		Logger::Print("Downloading from url %s\n", url.data());
+		Logger::Print("Downloading from url {}\n", url);
 
-		Download::FileDownload fDownload;
+		FileDownload fDownload;
 		fDownload.file = file;
 		fDownload.index = index;
 		fDownload.download = download;
@@ -212,26 +212,12 @@ namespace Components
 
 		Utils::String::Replace(url, " ", "%20");
 
-		// Just a speedtest ;)
-		//download->totalBytes = 1048576000;
-		//url = "http://speed.hetzner.de/1GB.bin";
-
 		download->valid = true;
-		/*ZeroMemory(&download->mgr, sizeof download->mgr);
-		mg_mgr_init(&download->mgr, &fDownload);
-		mg_connect_http(&download->mgr, Download::DownloadHandler, url.data(), nullptr, nullptr);
-
-		while (fDownload.downloading && !fDownload.download->terminateThread)
-		{
-			mg_mgr_poll(&download->mgr, 100);
-		}
-
-		mg_mgr_free(&download->mgr);*/
 
 		fDownload.downloading = true;
 
 		Utils::WebIO webIO;
-		webIO.setProgressCallback([&fDownload, &webIO](size_t bytes, size_t)
+		webIO.setProgressCallback([&fDownload, &webIO](std::size_t bytes, std::size_t)
 		{
 			if(!fDownload.downloading || fDownload.download->terminateThread)
 			{
@@ -239,10 +225,10 @@ namespace Components
 				return;
 			}
 
-			Download::DownloadProgress(&fDownload, bytes - fDownload.receivedBytes);
+			DownloadProgress(&fDownload, bytes - fDownload.receivedBytes);
 		});
 
-		bool result = false;
+		auto result = false;
 		fDownload.buffer = webIO.get(url, &result);
 		if (!result) fDownload.buffer.clear();
 
@@ -263,13 +249,13 @@ namespace Components
 
 	void Download::ModDownloader(ClientDownload* download)
 	{
-		if (!download) download = &Download::CLDownload;
+		if (!download) download = &CLDownload;
 
-		std::string host = "http://" + download->target.getString();
+		const auto host = "http://" + download->target.getString();
 
-		std::string listUrl = host + (download->isMap ? "/map" : "/list") + (download->isPrivate ? ("?password=" + download->hashedPassword) : "");
+		const auto listUrl = host + (download->isMap ? "/map" : "/list") + (download->isPrivate ? ("?password=" + download->hashedPassword) : "");
 
-		std::string list = Utils::WebIO("IW4x", listUrl).setTimeout(5000)->get();
+		const auto list = Utils::WebIO("IW4x", listUrl).setTimeout(5000)->get();
 		if (list.empty())
 		{
 			if (download->terminateThread) return;
@@ -277,29 +263,29 @@ namespace Components
 			download->thread.detach();
 			download->clear();
 
-			Scheduler::Once([]()
+			Scheduler::Once([]
 			{
 				Command::Execute("closemenu mod_download_popmenu");
 				Party::ConnectError("Failed to download the modlist!");
-			});
+			}, Scheduler::Pipeline::CLIENT);
 
 			return;
 		}
 
 		if (download->terminateThread) return;
 
-		if (!Download::ParseModList(download, list))
+		if (!ParseModList(download, list))
 		{
 			if (download->terminateThread) return;
 
 			download->thread.detach();
 			download->clear();
 
-			Scheduler::Once([]()
+			Scheduler::Once([]
 			{
 				Command::Execute("closemenu mod_download_popmenu");
 				Party::ConnectError("Failed to parse the modlist!");
-			});
+			}, Scheduler::Pipeline::CLIENT);
 
 			return;
 		}
@@ -309,26 +295,26 @@ namespace Components
 		static std::string mod;
 		mod = download->mod;
 
-		for (unsigned int i = 0; i < download->files.size(); ++i)
+		for (std::size_t i = 0; i < download->files.size(); ++i)
 		{
 			if (download->terminateThread) return;
 
-			if (!Download::DownloadFile(download, i))
+			if (!DownloadFile(download, i))
 			{
 				if (download->terminateThread) return;
 
-				mod = Utils::String::VA("Failed to download file: %s!", download->files[i].name.data());
+				mod = std::format("Failed to download file: {}!", download->files[i].name);
 				download->thread.detach();
 				download->clear();
 
-				Scheduler::Once([]()
+				Scheduler::Once([]
 				{
 					Dvar::Var("partyend_reason").set(mod);
 					mod.clear();
 
 					Command::Execute("closemenu mod_download_popmenu");
 					Command::Execute("openmenu menu_xboxlive_partyended");
-				});
+				}, Scheduler::Pipeline::CLIENT);
 
 				return;
 			}
@@ -341,19 +327,19 @@ namespace Components
 
 		if (download->isMap)
 		{
-			Scheduler::Once([]()
+			Scheduler::Once([]
 			{
 				Command::Execute("reconnect", false);
-			});
+			}, Scheduler::Pipeline::CLIENT);
 		}
 		else
 		{
 			// Run this on the main thread
-			Scheduler::Once([]()
+			Scheduler::Once([]
 			{
-				auto fsGame = Dvar::Var("fs_game");
-				fsGame.set(mod);
-				fsGame.get<Game::dvar_t*>()->modified = true;
+				Game::Dvar_SetString(*Game::fs_gameDirVar, mod.data());
+				const_cast<Game::dvar_t*>((*Game::fs_gameDirVar))->modified = true;
+
 				mod.clear();
 
 				Command::Execute("closemenu mod_download_popmenu", false);
@@ -364,40 +350,11 @@ namespace Components
 				}
 
 				Command::Execute("reconnect", false);
-			});
+			}, Scheduler::Pipeline::MAIN);
 		}
 	}
 
-#pragma endregion
-
-#pragma region Server
-
-	bool Download::IsClient(mg_connection *nc)
-	{
-		return (Download::GetClient(nc) != nullptr);
-	}
-
-	Game::client_t* Download::GetClient(mg_connection *nc)
-	{
-		Network::Address address(nc->sa.sa);
-
-		for (int i = 0; i < *Game::svs_numclients; ++i)
-		{
-			Game::client_t* client = &Game::svs_clients[i];
-
-			if (client->state >= 3)
-			{
-				if (address.getIP().full == Network::Address(client->netchan.remoteAddress).getIP().full)
-				{
-					return client;
-				}
-			}
-		}
-
-		return nullptr;
-	}
-
-	void Download::DownloadProgress(FileDownload* fDownload, size_t bytes)
+	void Download::DownloadProgress(FileDownload* fDownload, std::size_t bytes)
 	{
 		fDownload->receivedBytes += bytes;
 		fDownload->download->downBytes += bytes;
@@ -413,609 +370,398 @@ namespace Components
 				progress = (100.0 / fDownload->download->totalBytes) * fDownload->download->downBytes;
 			}
 
-			static unsigned int dlIndex, dlSize, dlProgress;
+			static std::uint32_t dlIndex, dlSize, dlProgress;
 			dlIndex = fDownload->index + 1;
 			dlSize = fDownload->download->files.size();
-			dlProgress = static_cast<unsigned int>(progress);
+			dlProgress = static_cast<std::uint32_t>(progress);
 
 			framePushed = true;
-			Scheduler::Once([]()
+			Scheduler::Once([]
 			{
 				framePushed = false;
-				Dvar::Var("ui_dl_progress").set(Utils::String::VA("(%d/%d) %d%%", dlIndex, dlSize, dlProgress));
-			});
+				UIDlProgress.set(std::format("({}/{}) {}%", dlIndex, dlSize, dlProgress));
+			}, Scheduler::Pipeline::MAIN);
 		}
 
-		int delta = Game::Sys_Milliseconds() - fDownload->download->lastTimeStamp;
+		auto delta = Game::Sys_Milliseconds() - fDownload->download->lastTimeStamp;
 		if (delta > 300)
 		{
-			bool doFormat = fDownload->download->lastTimeStamp != 0;
+			const auto doFormat = fDownload->download->lastTimeStamp != 0;
 			fDownload->download->lastTimeStamp = Game::Sys_Milliseconds();
 
-			auto dataLeft = fDownload->download->totalBytes - fDownload->download->downBytes;
+			const auto dataLeft = fDownload->download->totalBytes - fDownload->download->downBytes;
 
 			int timeLeft = 0;
 			if (fDownload->download->timeStampBytes)
 			{
-				double timeLeftD = ((1.0 * dataLeft) / fDownload->download->timeStampBytes) * delta;
+				const double timeLeftD = ((1.0 * dataLeft) / fDownload->download->timeStampBytes) * delta;
 				timeLeft = static_cast<int>(timeLeftD);
 			}
 
 			if (doFormat)
 			{
-				static size_t dlTsBytes;
+				static std::size_t dlTsBytes;
 				static int dlDelta, dlTimeLeft;
 				dlTimeLeft = timeLeft;
 				dlDelta = delta;
 				dlTsBytes = fDownload->download->timeStampBytes;
 
-				Scheduler::Once([]()
+				Scheduler::Once([]
 				{
-					Dvar::Var("ui_dl_timeLeft").set(Utils::String::FormatTimeSpan(dlTimeLeft));
-					Dvar::Var("ui_dl_transRate").set(Utils::String::FormatBandwidth(dlTsBytes, dlDelta));
-				});
+					UIDlTimeLeft.set(Utils::String::FormatTimeSpan(dlTimeLeft));
+					UIDlTransRate.set(Utils::String::FormatBandwidth(dlTsBytes, dlDelta));
+				}, Scheduler::Pipeline::MAIN);
 			}
 
 			fDownload->download->timeStampBytes = 0;
 		}
 	}
 
-	bool Download::VerifyPassword(mg_connection *nc, http_message* message)
+#pragma endregion
+
+#pragma region Server
+
+	void Download::LogFn(char c, [[maybe_unused]] void* param)
 	{
-		std::string g_password = Dvar::Var("g_password").get<std::string>();
-		if (g_password.empty()) return true;
-
-		// sha256 hashes are 64 chars long but we're gonna be safe here
-		char buffer[128] = { 0 };
-		int passLen = mg_get_http_var(&message->query_string, "password", buffer, sizeof buffer);
-
-		if (passLen <= 0 || std::string(buffer, passLen) != Utils::Cryptography::SHA256::Compute(g_password, true))
+		// Truncate & print if buffer is 1024 characters in length or otherwise only print when we reached a 'new line'
+		if (!std::isprint(static_cast<unsigned char>(c)) || MongooseLogBuffer.size() == 1024)
 		{
-			mg_printf(nc, ("HTTP/1.1 403 Forbidden\r\n"s +
-				"Content-Type: text/html\r\n"s +
-				"Connection: close\r\n"s +
-				"\r\n"s +
-				((passLen == 0) ? "Password Required"s : "Invalid Password"s)).c_str());
-
-			nc->flags |= MG_F_SEND_AND_CLOSE;
-			return false;
+			Logger::Print(Game::CON_CHANNEL_NETWORK, "{}\n", MongooseLogBuffer);
+			MongooseLogBuffer.clear();
+			return;
 		}
 
-		return true;
+		MongooseLogBuffer.push_back(c);
 	}
 
-	void Download::Forbid(mg_connection *nc)
+	static std::string InfoHandler()
 	{
-		mg_printf(nc, "HTTP/1.1 403 Forbidden\r\n"
-			"Content-Type: text/html\r\n"
-			"Connection: close\r\n"
-			"\r\n"
-			"403 - Forbidden");
+		const auto status = ServerInfo::GetInfo();
+		const auto host = ServerInfo::GetHostInfo();
 
-		nc->flags |= MG_F_SEND_AND_CLOSE;
-	}
+		std::unordered_map<std::string, nlohmann::json> info;
+		info["status"] = status.to_json();
+		info["host"] = host.to_json();
+		info["map_rotation"] = MapRotation::to_json();
+		info["dedicated"] = Dedicated::com_dedicated->current.integer;
 
-	void Download::ServerlistHandler(mg_connection* nc, int ev, void* /*ev_data*/)
-	{
-		// Only handle http requests
-		if (ev != MG_EV_HTTP_REQUEST) return;
+		std::vector<nlohmann::json> players;
 
-		std::vector<json11::Json> servers;
-
-		// Build server list
-		for (auto& node : Node::GetNodes())
+		// Build player list
+		for (auto i = 0; i < Game::MAX_CLIENTS; ++i)
 		{
-			if (node.isValid())
+			std::unordered_map<std::string, nlohmann::json> playerInfo;
+			// Insert default values
+			playerInfo["score"] = 0;
+			playerInfo["ping"] = 0;
+			playerInfo["name"] = "Unknown Soldier";
+			playerInfo["test_client"] = 0;
+
+			if (Dedicated::IsRunning())
 			{
-				servers.push_back(json11::Json{ node });
+				if (Game::svs_clients[i].header.state < Game::CS_ACTIVE) continue;
+				if (!Game::svs_clients[i].gentity || !Game::svs_clients[i].gentity->client) continue;
+
+				playerInfo["score"] = Game::SV_GameClientNum_Score(i);
+				playerInfo["ping"] = Game::svs_clients[i].ping;
+				playerInfo["name"] = Game::svs_clients[i].name;
+				playerInfo["test_client"] = Game::svs_clients[i].bIsTestClient;
 			}
+			else
+			{
+				// Score and ping are irrelevant
+				const auto* name = Game::PartyHost_GetMemberName(Game::g_lobbyData, i);
+				if (!name || !*name) continue;
+
+				playerInfo["name"] = name;
+			}
+
+			players.emplace_back(playerInfo);
 		}
 
-		mg_printf(nc,
-			"HTTP/1.1 200 OK\r\n"
-			"Content-Type: application/json\r\n"
-			"Connection: close\r\n"
-			"Access-Control-Allow-Origin: *\r\n"
-			"\r\n"
-			"%s", json11::Json(servers).dump().data());
-
-		nc->flags |= MG_F_SEND_AND_CLOSE;
+		info["players"] = players;
+		return nlohmann::json(info).dump();
 	}
 
-	void Download::MapHandler(mg_connection *nc, int ev, void* ev_data)
+	static std::string ListHandler()
 	{
-		// Only handle http requests
-		if (ev != MG_EV_HTTP_REQUEST) return;
+		static nlohmann::json jsonList;
+		static std::filesystem::path fsGamePre;
 
-		if (!Download::VerifyPassword(nc, reinterpret_cast<http_message*>(ev_data))) return;
+		const std::filesystem::path fsGame = (*Game::fs_gameDirVar)->current.string;
 
-		static std::string mapnamePre;
-		static json11::Json jsonList;
-
-		std::string mapname = (Party::IsInUserMapLobby() ? Dvar::Var("ui_mapname").get<std::string>() : Maps::GetUserMap()->getName());
-		if (!Maps::GetUserMap()->isValid() && !Party::IsInUserMapLobby())
+		if (!fsGame.empty() && (fsGamePre != fsGame))
 		{
-			mapnamePre.clear();
-			jsonList = std::vector<json11::Json>();
-		}
-		else if (!mapname.empty() && mapname != mapnamePre)
-		{
-			std::vector<json11::Json> fileList;
+			fsGamePre = fsGame;
 
-			mapnamePre = mapname;
+			std::vector<nlohmann::json> fileList;
 
-			std::string path = Dvar::Var("fs_basepath").get<std::string>() + "\\usermaps\\" + mapname;
+			const auto path = (*Game::fs_basepath)->current.string / fsGame;
+			auto list = FileSystem::GetSysFileList(path.generic_string(), "iwd", false);
+			list.emplace_back("mod.ff");
 
-			for (int i = 0; i < ARRAYSIZE(Maps::UserMapFiles); ++i)
+			for (const auto& file : list)
 			{
-				std::string filename = path + "\\" + mapname + Maps::UserMapFiles[i];
-				if (Utils::IO::FileExists(filename))
+				auto filename = path / file;
+
+				if (file.find("_svr_") != std::string::npos) // Files that are 'server only' are skipped
 				{
-					std::map<std::string, json11::Json> file;
-					std::string fileBuffer = Utils::IO::ReadFile(filename);
-
-					file["name"] = mapname + Maps::UserMapFiles[i];
-					file["size"] = static_cast<int>(fileBuffer.size());
-					file["hash"] = Utils::Cryptography::SHA256::Compute(fileBuffer, true);
-
-					fileList.push_back(file);
+					continue;
 				}
+
+				auto fileBuffer = Utils::IO::ReadFile(filename.generic_string());
+				if (fileBuffer.empty())
+				{
+					continue;
+				}
+
+				std::unordered_map<std::string, nlohmann::json> jsonFileList;
+				jsonFileList["name"] = file;
+				jsonFileList["size"] = fileBuffer.size();
+				jsonFileList["hash"] = Utils::Cryptography::SHA256::Compute(fileBuffer, true);
+
+				fileList.emplace_back(jsonFileList);
 			}
 
 			jsonList = fileList;
 		}
 
-		mg_printf(nc,
-			"HTTP/1.1 200 OK\r\n"
-			"Content-Type: application/json\r\n"
-			"Connection: close\r\n"
-			"\r\n"
-			"%s", jsonList.dump().data());
-
-		nc->flags |= MG_F_SEND_AND_CLOSE;
+		return jsonList.dump();
 	}
 
-	void Download::ListHandler(mg_connection* nc, int ev, void* ev_data)
+	static std::string MapHandler()
 	{
-		// Only handle http requests
-		if (ev != MG_EV_HTTP_REQUEST) return;
+		static std::string mapNamePre;
+		static nlohmann::json jsonList;
 
-		if (!Download::VerifyPassword(nc, reinterpret_cast<http_message*>(ev_data))) return;
-
-// 		if (!Download::IsClient(nc))
-// 		{
-// 			Download::Forbid(nc);
-// 		}
-// 		else
+		const std::string mapName = Party::IsInUserMapLobby() ? (*Game::ui_mapname)->current.string : Maps::GetUserMap()->getName();
+		if (!Maps::GetUserMap()->isValid() && !Party::IsInUserMapLobby())
 		{
-			static std::string fsGamePre;
-			static json11::Json jsonList;
-
-			std::string fsGame = Dvar::Var("fs_game").get<std::string>();
-
-			if (!fsGame.empty() && fsGame != fsGamePre)
-			{
-				std::vector<json11::Json> fileList;
-
-				fsGamePre = fsGame;
-
-				std::string path = Dvar::Var("fs_basepath").get<std::string>() + "\\" + fsGame;
-				auto list = FileSystem::GetSysFileList(path, "iwd", false);
-
-				list.push_back("mod.ff");
-
-				for (auto i = list.begin(); i != list.end(); ++i)
-				{
-					std::string filename = path + "\\" + *i;
-					if (strstr(i->data(), "_svr_") == nullptr && Utils::IO::FileExists(filename))
-					{
-						std::map<std::string, json11::Json> file;
-						std::string fileBuffer = Utils::IO::ReadFile(filename);
-
-						file["name"] = *i;
-						file["size"] = static_cast<int>(fileBuffer.size());
-						file["hash"] = Utils::Cryptography::SHA256::Compute(fileBuffer, true);
-
-						fileList.push_back(file);
-					}
-				}
-
-				jsonList = fileList;
-			}
-
-			mg_printf(nc,
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: application/json\r\n"
-				"Connection: close\r\n"
-				"\r\n"
-				"%s", jsonList.dump().data());
-
-			nc->flags |= MG_F_SEND_AND_CLOSE;
+			mapNamePre.clear();
+			jsonList = {};
 		}
-	}
-
-	void Download::FileHandler(mg_connection *nc, int ev, void *ev_data)
-	{
-		// Only handle http requests
-		if (ev != MG_EV_HTTP_REQUEST) return;
-
-		http_message* message = reinterpret_cast<http_message*>(ev_data);
-
-		//if (!Download::VerifyPassword(nc, message)) return;
-
-// 		if (!Download::IsClient(nc))
-// 		{
-// 			Download::Forbid(nc);
-// 		}
-// 		else
+		else if (!mapName.empty() && mapName != mapNamePre)
 		{
-			std::string url(message->uri.p, message->uri.len);
-			Utils::String::Replace(url, "\\", "/");
+			std::vector<nlohmann::json> fileList;
 
-			if (url.size() >= 6)
+			mapNamePre = mapName;
+
+			const std::filesystem::path basePath = (*Game::fs_basepath)->current.string;
+			const auto path = basePath / "usermaps" / mapName;
+
+			for (std::size_t i = 0; i < ARRAYSIZE(Maps::UserMapFiles); ++i)
 			{
-				url = url.substr(6);
-			}
+				const auto filename = std::format("{}\\{}{}", path.generic_string(), mapName, Maps::UserMapFiles[i]);
 
-			Utils::String::Replace(url, "%20", " ");
-
-			bool isMap = false;
-			if (Utils::String::StartsWith(url, "map/"))
-			{
-				isMap = true;
-				url = url.substr(4);
-
-				std::string mapname = (Party::IsInUserMapLobby() ? Dvar::Var("ui_mapname").get<std::string>() : Maps::GetUserMap()->getName());
-
-				bool isValidFile = false;
-				for (int i = 0; i < ARRAYSIZE(Maps::UserMapFiles); ++i)
+				std::unordered_map<std::string, nlohmann::json> file;
+				auto fileBuffer = Utils::IO::ReadFile(filename);
+				if (fileBuffer.empty())
 				{
-					if (url == (mapname + Maps::UserMapFiles[i]))
-					{
-						isValidFile = true;
-						break;
-					}
+					continue;
 				}
 
-				if ((!Maps::GetUserMap()->isValid() && !Party::IsInUserMapLobby()) || !isValidFile)
-				{
-					Download::Forbid(nc);
-					return;
-				}
+				file["name"] = mapName + Maps::UserMapFiles[i];
+				file["size"] = fileBuffer.size();
+				file["hash"] = Utils::Cryptography::SHA256::Compute(fileBuffer, true);
 
-				url = Utils::String::VA("usermaps\\%s\\%s", mapname.data(), url.data());
-			}
-			else
-			{
-				if (url.find_first_of("/") != std::string::npos || (!Utils::String::EndsWith(url, ".iwd") && url != "mod.ff") || strstr(url.data(), "_svr_") != nullptr)
-				{
-					Download::Forbid(nc);
-					return;
-				}
+				fileList.emplace_back(file);
 			}
 
-			std::string file;
-			std::string fsGame = Dvar::Var("fs_game").get<std::string>();
-			std::string path = Dvar::Var("fs_basepath").get<std::string>() + "\\" + (isMap ? "" : fsGame + "\\") + url;
-
-			if ((!isMap && fsGame.empty()) || !Utils::IO::ReadFile(path, &file))
-			{
-				mg_printf(nc,
-					"HTTP/1.1 404 Not Found\r\n"
-					"Content-Type: text/html\r\n"
-					"Connection: close\r\n"
-					"\r\n"
-					"404 - Not Found %s", path.data());
-			}
-			else
-			{
-				mg_printf(nc,
-					"HTTP/1.1 200 OK\r\n"
-					"Content-Type: application/octet-stream\r\n"
-					"Content-Length: %d\r\n"
-					"Connection: close\r\n"
-					"\r\n", file.size());
-
-				mg_send(nc, file.data(), static_cast<int>(file.size()));
-			}
-
-			nc->flags |= MG_F_SEND_AND_CLOSE;
-		}
-	}
-
-	void Download::InfoHandler(mg_connection* nc, int ev, void* /*ev_data*/)
-	{
-		// Only handle http requests
-		if (ev != MG_EV_HTTP_REQUEST) return;
-
-		//if (!Download::VerifyPassword(nc, reinterpret_cast<http_message*>(ev_data))) return;
-
-		Utils::InfoString status = ServerInfo::GetInfo();
-		Utils::InfoString host = ServerInfo::GetHostInfo();
-
-		std::map<std::string, json11::Json> info;
-		info["status"] = status.to_json();
-		info["host"] = host.to_json();
-
-		std::vector<json11::Json> players;
-
-		// Build player list
-		for (int i = 0; i < atoi(status.get("sv_maxclients").data()); ++i) // Maybe choose 18 here?
-		{
-			std::map<std::string, json11::Json> playerInfo;
-			playerInfo["score"] = 0;
-			playerInfo["ping"] = 0;
-			playerInfo["name"] = "";
-
-			if (Dvar::Var("sv_running").get<bool>())
-			{
-				if (Game::svs_clients[i].state < 3) continue;
-
-				playerInfo["score"] = Game::SV_GameClientNum_Score(i);
-				playerInfo["ping"] = Game::svs_clients[i].ping;
-				playerInfo["name"] = Game::svs_clients[i].name;
-			}
-			else
-			{
-				// Score and ping are irrelevant
-				const char* namePtr = Game::PartyHost_GetMemberName(reinterpret_cast<Game::PartyData_t*>(0x1081C00), i);
-				if (!namePtr || !namePtr[0]) continue;
-
-				playerInfo["name"] = namePtr;
-			}
-
-			players.push_back(playerInfo);
+			jsonList = fileList;
 		}
 
-		info["players"] = players;
-
-		mg_printf(nc,
-			"HTTP/1.1 200 OK\r\n"
-			"Content-Type: application/json\r\n"
-			"Connection: close\r\n"
-			"Access-Control-Allow-Origin: *\r\n"
-			"\r\n"
-			"%s", json11::Json(info).dump().data());
-
-		nc->flags |= MG_F_SEND_AND_CLOSE;
+		return jsonList.dump();
 	}
 
-	void Download::EventHandler(mg_connection *nc, int ev, void *ev_data)
+	static void FileHandler(mg_connection* c, const mg_http_message* hm)
 	{
-		// Only handle http requests
-		if (ev != MG_EV_HTTP_REQUEST) return;
+		std::string url(hm->uri.ptr, hm->uri.len);
 
-		http_message* message = reinterpret_cast<http_message*>(ev_data);
+		Utils::String::Replace(url, "\\", "/");
 
-// 		if (message->uri.p, message->uri.len == "/"s)
-// 		{
-// 			mg_printf(nc,
-// 				"HTTP/1.1 200 OK\r\n"
-// 				"Content-Type: text/html\r\n"
-// 				"Connection: close\r\n"
-// 				"\r\n"
-// 				"Hi fella!<br>You are%s connected to this server!", (Download::IsClient(nc) ? " " : " not"));
-//
-//				Game::client_t* client = Download::GetClient(nc);
-//
-// 			if (client)
-// 			{
-// 				mg_printf(nc, "<br>Hello %s!", client->name);
-// 			}
-// 		}
-// 		else
+		url = url.substr(6); // Strip /file
+		Utils::String::Replace(url, "%20", " ");
+
+		auto isMap = false;
+		if (url.starts_with("map/"))
 		{
-			//std::string path = (Dvar::Var("fs_basepath").get<std::string>() + "\\" BASEGAME "\\html");
-			//mg_serve_http_opts opts = { 0 };
-			//opts.document_root = path.data();
-			//mg_serve_http(nc, message, opts);
+			isMap = true;
+			url = url.substr(4); // Strip map/
 
-			FileSystem::File file;
-			std::string url = "html" + std::string(message->uri.p, message->uri.len);
-
-			if (Utils::String::EndsWith(url, "/"))
+			std::string mapName = (Party::IsInUserMapLobby() ? (*Game::ui_mapname)->current.string : Maps::GetUserMap()->getName());
+			auto isValidFile = false;
+			for (std::size_t i = 0; i < ARRAYSIZE(Maps::UserMapFiles); ++i)
 			{
-				url.append("index.html");
-				file = FileSystem::File(url);
-			}
-			else
-			{
-				file = FileSystem::File(url);
-
-				if (!file.exists())
+				if (url == (mapName + Maps::UserMapFiles[i]))
 				{
-					url.append("/index.html");
-					file = FileSystem::File(url);
+					isValidFile = true;
+					break;
 				}
 			}
 
-			std::string mimeType = Utils::GetMimeType(url);
-
-			if (file.exists())
+			if ((!Maps::GetUserMap()->isValid() && !Party::IsInUserMapLobby()) || !isValidFile)
 			{
-				std::string buffer = file.getBuffer();
-
-				mg_printf(nc,
-					"HTTP/1.1 200 OK\r\n"
-					"Content-Type: %s\r\n"
-					"Content-Length: %d\r\n"
-					"Connection: close\r\n"
-					"\r\n", mimeType.data(), buffer.size());
-
-				mg_send(nc, buffer.data(), static_cast<int>(buffer.size()));
+				mg_http_reply(c, 403, "Content-Type: text/html\r\n", "%s", "403 - Forbidden");
+				return;
 			}
-			else
+
+			url = std::format("usermaps\\{}\\{}", mapName, url);
+		}
+		else
+		{
+			if ((!url.ends_with(".iwd") && url != "mod.ff") || url.find("_svr_") != std::string::npos)
 			{
-				mg_printf(nc,
-					"HTTP/1.1 404 Not Found\r\n"
-					"Content-Type: text/html\r\n"
-					"Connection: close\r\n"
-					"\r\n"
-					"404 - Not Found");
+				mg_http_reply(c, 403, "Content-Type: text/html\r\n", "%s", "403 - Forbidden");
+				return;
 			}
 		}
 
-		nc->flags |= MG_F_SEND_AND_CLOSE;
+		const std::string fsGame = (*Game::fs_gameDirVar)->current.string;
+		const auto path = std::format("{}\\{}{}", (*Game::fs_basepath)->current.string, isMap ? ""s : (fsGame + "\\"s), url);
+
+		std::string file;
+		if ((!isMap && fsGame.empty()) || !Utils::IO::ReadFile(path, &file))
+		{
+			mg_http_reply(c, 404, "Content-Type: text/html\r\n", "404 - Not Found %s", path.data());
+		}
+		else
+		{
+			mg_printf(c, "%s", "HTTP/1.1 200 OK\r\n");
+			mg_printf(c, "%s", "Content-Type: application/octet-stream\r\n");
+			mg_printf(c, "Content-Length: %d\r\n", static_cast<int>(file.size()));
+			mg_printf(c, "%s", "Connection: close\r\n");
+			mg_printf(c, "%s", "\r\n");
+			mg_send(c, file.data(), file.size());
+		}
+	}
+
+	static void EventHandler(mg_connection* c, const int ev, void* ev_data, [[maybe_unused]] void* fn_data)
+	{
+		if (ev != MG_EV_HTTP_MSG)
+		{
+			return;
+		}
+
+		auto* hm = static_cast<mg_http_message*>(ev_data);
+		const std::string url(hm->uri.ptr, hm->uri.len);
+
+		if (url.starts_with("/info"))
+		{
+			const auto reply = InfoHandler();
+			mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", reply.data());
+		}
+		else if (url.starts_with("/list"))
+		{
+			const auto reply = ListHandler();
+			mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", reply.data());
+		}
+		else if (url.starts_with("/map"))
+		{
+			const auto reply = MapHandler();
+			mg_http_reply(c, 200, "Content-Type: application/json\r\n", "%s", reply.data());
+		}
+		else if (url.starts_with("/file"))
+		{
+			FileHandler(c, hm);
+		}
+		else
+		{
+			mg_http_serve_opts opts = { .root_dir = "iw4x/html" }; // Serve local dir
+			mg_http_serve_dir(c, hm, &opts);
+		}
+
+		c->is_resp = FALSE; // This is important, the lack of this line of code will make the server die (in-game)
+		c->is_draining = TRUE;
 	}
 
 #pragma endregion
 
 	Download::Download()
 	{
-		if (Dedicated::IsEnabled() /*|| Dvar::Var("mod_force_download_server").get<bool>()*/)
+		AssertSize(Game::va_info_t, 0x804);
+		AssertSize(jmp_buf, 0x40);
+		AssertSize(Game::TraceThreadInfo, 0x8);
+
+		if (Dedicated::IsEnabled())
 		{
-			ZeroMemory(&Download::Mgr, sizeof Download::Mgr);
-			mg_mgr_init(&Download::Mgr, nullptr);
-
-			Network::OnStart([]()
+			if (!Flags::HasFlag("disable-mongoose"))
 			{
-				mg_connection* nc = mg_bind(&Download::Mgr, Utils::String::VA("%hu", Network::GetPort()), Download::EventHandler);
+#ifdef _DEBUG
+				mg_log_set(MG_LL_INFO);
+#else
+				mg_log_set(MG_LL_ERROR);
+#endif
 
-				if (nc)
-				{
-					// Handle special requests
-					mg_register_http_endpoint(nc, "/info", Download::InfoHandler);
-					mg_register_http_endpoint(nc, "/list", Download::ListHandler);
-					mg_register_http_endpoint(nc, "/map", Download::MapHandler);
-					mg_register_http_endpoint(nc, "/file/", Download::FileHandler);
-					mg_register_http_endpoint(nc, "/serverlist", Download::ServerlistHandler);
+#ifdef MG_OVERRIDE_LOG_FN
+				mg_log_set_fn(LogFn, nullptr);
+#endif
 
-					mg_set_protocol_http_websocket(nc);
-				}
-				else
-				{
-					Logger::Print("Failed to bind TCP socket, moddownload won't work!\n");
-				}
-			});
+				mg_mgr_init(&Mgr);
 
-            Download::ServerRunning = true;
-			Download::Terminate = false;
-			Download::ServerThread = std::thread([]
-			{
-				while (!Download::Terminate)
+				Events::OnNetworkInit([]() -> void
 				{
-					mg_mgr_poll(&Download::Mgr, 100);
-				}
-			});
+					const auto* nc = mg_http_listen(&Mgr, Utils::String::VA(":%hu", Network::GetPort()), &EventHandler, &Mgr);
+					if (!nc)
+					{
+						Logger::PrintError(Game::CON_CHANNEL_ERROR, "Failed to bind TCP socket, mod download won't work!\n");
+						Terminate = true;
+					}
+				});
+
+				ServerRunning = true;
+				Terminate = false;
+				ServerThread = Utils::Thread::CreateNamedThread("Mongoose", []() -> void
+				{
+					Com_InitThreadData();
+
+					while (!Terminate)
+					{
+						mg_mgr_poll(&Mgr, 1000);
+					}
+				});
+			}
 		}
 		else
 		{
-			Dvar::OnInit([]()
+			Events::OnDvarInit([]() -> void
 			{
-				Dvar::Register<const char*>("ui_dl_timeLeft", "", Game::dvar_flag::DVAR_FLAG_NONE, "");
-				Dvar::Register<const char*>("ui_dl_progress", "", Game::dvar_flag::DVAR_FLAG_NONE, "");
-				Dvar::Register<const char*>("ui_dl_transRate", "", Game::dvar_flag::DVAR_FLAG_NONE, "");
+				UIDlTimeLeft = Dvar::Register<const char*>("ui_dl_timeLeft", "", Game::DVAR_NONE, "");
+				UIDlProgress = Dvar::Register<const char*>("ui_dl_progress", "", Game::DVAR_NONE, "");
+				UIDlTransRate = Dvar::Register<const char*>("ui_dl_transRate", "", Game::DVAR_NONE, "");
 			});
 
-			UIScript::Add("mod_download_cancel", [](UIScript::Token)
+			UIScript::Add("mod_download_cancel", []([[maybe_unused]] const UIScript::Token& token, [[maybe_unused]] const Game::uiInfo_s* info)
 			{
-				Download::CLDownload.clear();
+				CLDownload.clear();
 			});
 		}
 
-		Dvar::OnInit([]()
+		Events::OnDvarInit([]
 		{
-			Dvar::Register<bool>("sv_wwwDownload", false, Game::dvar_flag::DVAR_FLAG_DEDISAVED, "Set to true to enable downloading maps/mods from an external server.");
-			Dvar::Register<const char*>("sv_wwwBaseUrl", "", Game::dvar_flag::DVAR_FLAG_DEDISAVED, "Set to the base url for the external map download.");
-
-            // Force users to enable this because we don't want to accidentally turn everyone's pc into a http server into all their files again
-            // not saying we are but ya know... accidents happen
-            // by having it saved we force the user to enable it in config_mp because it only checks the dvar on startup to see if we should init download or not
-            Dvar::Register<bool>("mod_force_download_server", false, Game::dvar_flag::DVAR_FLAG_SAVED, "Set to true to force the client to run the download server for mods (for mods in private matches).");
-		});
-
-		Scheduler::OnFrame([]()
-		{
-			int workingCount = 0;
-
-			for (auto i = Download::ScriptDownloads.begin(); i != Download::ScriptDownloads.end();)
-			{
-				auto download = *i;
-
-				if (download->isDone())
-				{
-					download->notifyDone();
-					i = Download::ScriptDownloads.erase(i);
-					continue;
-				}
-
-				if (download->isWorking())
-				{
-					download->notifyProgress();
-					++workingCount;
-				}
-
-				++i;
-			}
-
-			for (auto& download : Download::ScriptDownloads)
-			{
-				if (workingCount > 5) break;
-				if (!download->isWorking())
-				{
-					download->startWorking();
-					++workingCount;
-				}
-			}
-		});
-
-		Script::OnVMShutdown([]()
-		{
-			Download::ScriptDownloads.clear();
-		});
-
-		Script::AddFunction("httpGet", [](Game::scr_entref_t)
-		{
-			if (!Dedicated::IsEnabled() && !Flags::HasFlag("scriptablehttp")) return;
-			if (Game::Scr_GetNumParam() < 1u) return;
-
-			std::string url = Game::Scr_GetString(0);
-			unsigned int object = Game::AllocObject();
-
-			Game::Scr_AddObject(object);
-
-			Download::ScriptDownloads.push_back(std::make_shared<ScriptDownload>(url, object));
-			Game::RemoveRefToObject(object);
-		});
-
-		Script::AddFunction("httpCancel", [](Game::scr_entref_t)
-		{
-			if (!Dedicated::IsEnabled() && !Flags::HasFlag("scriptablehttp")) return;
-			if (Game::Scr_GetNumParam() < 1u) return;
-
-			unsigned int object = Game::Scr_GetObject(0);
-			for (auto& download : Download::ScriptDownloads)
-			{
-				if (object == download->getObject())
-				{
-					download->cancel();
-					break;
-				}
-			}
+			SV_wwwDownload = Dvar::Register<bool>("sv_wwwDownload", false, Game::DVAR_NONE, "Set to true to enable downloading maps/mods from an external server.");
+			SV_wwwBaseUrl = Dvar::Register<const char*>("sv_wwwBaseUrl", "", Game::DVAR_NONE, "Set to the base url for the external map download.");
 		});
 	}
 
 	Download::~Download()
 	{
-		if (Download::ServerRunning)
+		if (ServerRunning)
 		{
-			mg_mgr_free(&Download::Mgr);
+			mg_mgr_free(&Mgr);
 		}
 	}
 
 	void Download::preDestroy()
 	{
-		Download::Terminate = true;
-		if (Download::ServerThread.joinable())
+		Terminate = true;
+		if (ServerThread.joinable())
 		{
-			Download::ServerThread.join();
+			ServerThread.join();
 		}
 
 		if (!Dedicated::IsEnabled())
 		{
-			Download::CLDownload.clear();
+			CLDownload.clear();
 		}
-
-		Download::ScriptDownloads.clear();
 	}
 }

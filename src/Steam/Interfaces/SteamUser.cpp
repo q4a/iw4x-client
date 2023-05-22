@@ -1,4 +1,5 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "Components/Modules/Auth.hpp"
 
 STEAM_IGNORE_WARNINGS_START
 
@@ -22,11 +23,11 @@ namespace Steam
 
 		if (!idBits)
 		{
-			if (Components::Dedicated::IsEnabled() || Components::ZoneBuilder::IsEnabled()) // Dedi guid
+			if (Components::ZoneBuilder::IsEnabled())
 			{
 				idBits = *reinterpret_cast<unsigned __int64*>(const_cast<char*>("DEDICATE"));
 			}
-			else if (Components::Singleton::IsFirstInstance()) // ECDSA guid
+			else if (Components::Singleton::IsFirstInstance() && !Components::Dedicated::IsEnabled()) // ECDSA guid
 			{
 				idBits = Components::Auth::GetKeyHash();
 			}
@@ -42,7 +43,6 @@ namespace Steam
 
 	int User::InitiateGameConnection(void *pAuthBlob, int cbMaxAuthBlob, SteamID steamIDGameServer, unsigned int unIPServer, unsigned short usPortServer, bool bSecure)
 	{
-		Components::Logger::Print("%s\n", __FUNCTION__);
 		return 0;
 	}
 

@@ -6,7 +6,6 @@ namespace Components
 	{
 	public:
 		Discovery();
-		~Discovery();
 
 		void preDestroy() override;
 
@@ -17,5 +16,8 @@ namespace Components
 		static bool IsPerforming;
 		static std::thread Thread;
 		static std::string Challenge;
+
+		static Dvar::Var NetDiscoveryPortRangeMin;
+		static Dvar::Var NetDiscoveryPortRangeMax;
 	};
 }

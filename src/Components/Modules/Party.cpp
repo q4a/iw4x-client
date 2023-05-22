@@ -1,9 +1,44 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include <Utils/InfoString.hpp>
+
+#include "Auth.hpp"
+#include "Download.hpp"
+#include "Friends.hpp"
+#include "Gamepad.hpp"
+#include "Node.hpp"
+#include "Party.hpp"
+#include "ServerList.hpp"
+#include "Stats.hpp"
+#include "TextRenderer.hpp"
+#include "Voice.hpp"
+
+#include <version.hpp>
+
+#define CL_MOD_LOADING
 
 namespace Components
 {
-	Party::JoinContainer Party::Container;
-	std::map<uint64_t, Network::Address> Party::LobbyMap;
+	class JoinContainer
+	{
+	public:
+		Network::Address target;
+		std::string challenge;
+		std::string motd;
+		DWORD joinTime;
+		bool valid;
+		int matchType;
+
+		Utils::InfoString info;
+
+		// Party-specific stuff
+		DWORD requestTime;
+		bool awaitingPlaylist;
+	};
+
+	static JoinContainer Container;
+	std::map<std::uint64_t, Network::Address> Party::LobbyMap;
+
+	Dvar::Var Party::PartyEnable;
 
 	SteamID Party::GenerateLobbyId()
 	{
@@ -19,35 +54,36 @@ namespace Components
 
 	Network::Address Party::Target()
 	{
-		return Party::Container.target;
+		return Container.target;
 	}
 
 	void Party::Connect(Network::Address target)
 	{
 		Node::Add(target);
 
-		Party::Container.valid = true;
-		Party::Container.awaitingPlaylist = false;
-		Party::Container.joinTime = Game::Sys_Milliseconds();
-		Party::Container.target = target;
-		Party::Container.challenge = Utils::Cryptography::Rand::GenerateChallenge();
+		Container.valid = true;
+		Container.awaitingPlaylist = false;
+		Container.joinTime = Game::Sys_Milliseconds();
+		Container.target = target;
+		Container.challenge = Utils::Cryptography::Rand::GenerateChallenge();
 
-		Network::SendCommand(Party::Container.target, "getinfo", Party::Container.challenge);
+		Network::SendCommand(Container.target, "getinfo", Container.challenge);
 
 		Command::Execute("openmenu popup_reconnectingtoparty");
 	}
 
 	const char* Party::GetLobbyInfo(SteamID lobby, const std::string& key)
 	{
-		if (Party::LobbyMap.find(lobby.bits) != Party::LobbyMap.end())
+		if (LobbyMap.contains(lobby.bits))
 		{
-			Network::Address address = Party::LobbyMap[lobby.bits];
+			Network::Address address = LobbyMap[lobby.bits];
 
-			if (key == "addr")
+			if (key == "addr"s)
 			{
 				return Utils::String::VA("%d", address.getIP().full);
 			}
-			else if (key == "port")
+
+			if (key == "port"s)
 			{
 				return Utils::String::VA("%d", address.getPort());
 			}
@@ -58,15 +94,11 @@ namespace Components
 
 	void Party::RemoveLobby(SteamID lobby)
 	{
-		if (Party::LobbyMap.find(lobby.bits) != Party::LobbyMap.end())
-		{
-			Party::LobbyMap.erase(Party::LobbyMap.find(lobby.bits));
-		}
+		LobbyMap.erase(lobby.bits);
 	}
 
 	void Party::ConnectError(const std::string& message)
 	{
-		Localization::ClearTemp();
 		Command::Execute("closemenu popup_reconnectingtoparty");
 		Dvar::Var("partyend_reason").set(message);
 		Command::Execute("openmenu menu_xboxlive_partyended");
@@ -74,17 +106,23 @@ namespace Components
 
 	std::string Party::GetMotd()
 	{
-		return Party::Container.motd;
+		return Container.motd;
 	}
 
-	Game::dvar_t* Party::RegisterMinPlayers(const char* name, int /*value*/, int /*min*/, int max, Game::dvar_flag flag, const char* description)
+	std::string Party::GetHostName()
 	{
-		return Dvar::Register<int>(name, 1, 1, max, Game::dvar_flag::DVAR_FLAG_WRITEPROTECTED | flag, description).get<Game::dvar_t*>();
+		return Container.info.get("hostname");
+	}
+
+	int Party::GetMaxClients()
+	{
+		const auto value = Container.info.get("sv_maxclients");
+		return std::strtol(value.data(), nullptr, 10);
 	}
 
 	bool Party::PlaylistAwaiting()
 	{
-		return Party::Container.awaitingPlaylist;
+		return Container.awaitingPlaylist;
 	}
 
 	void Party::PlaylistContinue()
@@ -94,20 +132,20 @@ namespace Components
 		// Ensure we can join
 		*Game::g_lobbyCreateInProgress = false;
 
-		Party::Container.awaitingPlaylist = false;
+		Container.awaitingPlaylist = false;
 
-		SteamID id = Party::GenerateLobbyId();
+		SteamID id = GenerateLobbyId();
 
 		// Temporary workaround
 		// TODO: Patch the 127.0.0.1 -> loopback mapping in the party code
-		if (Party::Container.target.isLoopback())
+		if (Container.target.isLoopback())
 		{
 			if (*Game::numIP)
 			{
-				Party::Container.target.setIP(*Game::localIP);
-				Party::Container.target.setType(Game::netadrtype_t::NA_IP);
+				Container.target.setIP(*Game::localIP);
+				Container.target.setType(Game::netadrtype_t::NA_IP);
 
-				Logger::Print("Trying to connect to party with loopback address, using a local ip instead: %s\n", Party::Container.target.getCString());
+				Logger::Print("Trying to connect to party with loopback address, using a local ip instead: {}\n", Container.target.getString());
 			}
 			else
 			{
@@ -115,17 +153,17 @@ namespace Components
 			}
 		}
 
-		Party::LobbyMap[id.bits] = Party::Container.target;
+		LobbyMap[id.bits] = Container.target;
 
 		Game::Steam_JoinLobby(id, 0);
 	}
 
 	void Party::PlaylistError(const std::string& error)
 	{
-		Party::Container.valid = false;
-		Party::Container.awaitingPlaylist = false;
+		Container.valid = false;
+		Container.awaitingPlaylist = false;
 
-		Party::ConnectError(error);
+		ConnectError(error);
 	}
 
 	DWORD Party::UIDvarIntStub(char* dvar)
@@ -140,18 +178,23 @@ namespace Components
 
 	bool Party::IsInLobby()
 	{
-		return (!Dvar::Var("sv_running").get<bool>() && Dvar::Var("party_enable").get<bool>() && Dvar::Var("party_host").get<bool>());
+		return (!Dedicated::IsRunning() && PartyEnable.get<bool>() && Dvar::Var("party_host").get<bool>());
 	}
 
 	bool Party::IsInUserMapLobby()
 	{
-		return (Party::IsInLobby() && Maps::IsUserMap(Dvar::Var("ui_mapname").get<const char*>()));
+		return (IsInLobby() && Maps::IsUserMap((*Game::ui_mapname)->current.string));
+	}
+
+	bool Party::IsEnabled()
+	{
+		return PartyEnable.get<bool>();
 	}
 
 	Party::Party()
 	{
-		static Game::dvar_t* partyEnable = Dvar::Register<bool>("party_enable", Dedicated::IsEnabled(), Game::dvar_flag::DVAR_FLAG_NONE, "Enable party system").get<Game::dvar_t*>();
-		Dvar::Register<bool>("xblive_privatematch", true, Game::dvar_flag::DVAR_FLAG_WRITEPROTECTED, "").get<Game::dvar_t*>();
+		PartyEnable = Dvar::Register<bool>("party_enable", Dedicated::IsEnabled(), Game::DVAR_NONE, "Enable party system");
+		Dvar::Register<bool>("xblive_privatematch", true, Game::DVAR_INIT, "");
 
 		// various changes to SV_DirectConnect-y stuff to allow non-party joinees
 		Utils::Hook::Set<WORD>(0x460D96, 0x90E9);
@@ -184,8 +227,8 @@ namespace Components
 		// causes 'does current Steam lobby match' calls in Steam_JoinLobby to be ignored
 		Utils::Hook::Set<BYTE>(0x49D007, 0xEB);
 
-		// functions checking party heartbeat timeouts, cause random issues
-		Utils::Hook::Nop(0x4E532D, 5);
+		// function checking party heartbeat timeouts, cause random issues
+		Utils::Hook::Nop(0x4E532D, 5); // PartyHost_TimeoutMembers
 
 		// Steam_JoinLobby call causes migration
 		Utils::Hook::Nop(0x5AF851, 5);
@@ -217,7 +260,7 @@ namespace Components
 		Utils::Hook::Nop(0x5A8E33, 11);
 
 		// Enable XP Bar
-		Utils::Hook(0x62A2A7, Party::UIDvarIntStub, HOOK_CALL).install()->quick();
+		Utils::Hook(0x62A2A7, UIDvarIntStub, HOOK_CALL).install()->quick();
 
 		// Set NAT to open
 		Utils::Hook::Set<int>(0x79D898, 1);
@@ -228,6 +271,7 @@ namespace Components
 		Utils::Hook::Nop(0x4077A1, 5); // PartyMigrate_Frame
 
 		// Patch playlist stuff for non-party behavior
+		static Game::dvar_t* partyEnable = PartyEnable.get<Game::dvar_t*>();
 		Utils::Hook::Set<Game::dvar_t**>(0x4A4093, &partyEnable);
 		Utils::Hook::Set<Game::dvar_t**>(0x4573F1, &partyEnable);
 		Utils::Hook::Set<Game::dvar_t**>(0x5B1A0C, &partyEnable);
@@ -237,31 +281,22 @@ namespace Components
 		Utils::Hook::Xor<BYTE>(0x4573FA, 1);
 		Utils::Hook::Xor<BYTE>(0x5B1A17, 1);
 
-		// Fix xstartlobby
-		//Utils::Hook::Set<BYTE>(0x5B71CD, 0xEB);
-
-		// Patch party_minplayers to 1 and protect it
-		//Utils::Hook(0x4D5D51, Party::RegisterMinPlayers, HOOK_CALL).install()->quick();
-
 		// Set ui_maxclients to sv_maxclients
 		Utils::Hook::Set<const char*>(0x42618F, "sv_maxclients");
 		Utils::Hook::Set<const char*>(0x4D3756, "sv_maxclients");
 		Utils::Hook::Set<const char*>(0x5E3772, "sv_maxclients");
 
 		// Unlatch maxclient dvars
-		Utils::Hook::Xor<BYTE>(0x426187, Game::dvar_flag::DVAR_FLAG_LATCHED);
-		Utils::Hook::Xor<BYTE>(0x4D374E, Game::dvar_flag::DVAR_FLAG_LATCHED);
-		Utils::Hook::Xor<BYTE>(0x5E376A, Game::dvar_flag::DVAR_FLAG_LATCHED);
-		Utils::Hook::Xor<DWORD>(0x4261A1, Game::dvar_flag::DVAR_FLAG_LATCHED);
-		Utils::Hook::Xor<DWORD>(0x4D376D, Game::dvar_flag::DVAR_FLAG_LATCHED);
-		Utils::Hook::Xor<DWORD>(0x5E3789, Game::dvar_flag::DVAR_FLAG_LATCHED);
+		Utils::Hook::Xor<BYTE>(0x426187, Game::DVAR_LATCH);
+		Utils::Hook::Xor<BYTE>(0x4D374E, Game::DVAR_LATCH);
+		Utils::Hook::Xor<BYTE>(0x5E376A, Game::DVAR_LATCH);
+		Utils::Hook::Xor<DWORD>(0x4261A1, Game::DVAR_LATCH);
+		Utils::Hook::Xor<DWORD>(0x4D376D, Game::DVAR_LATCH);
+		Utils::Hook::Xor<DWORD>(0x5E3789, Game::DVAR_LATCH);
 
-		// Patch Live_PlayerHasLoopbackAddr
-		//Utils::Hook::Set<DWORD>(0x418F30, 0x90C3C033);
-
-		Command::Add("connect", [](Command::Params* params)
+		Command::Add("connect", [](const Command::Params* params)
 		{
-			if (params->length() < 2)
+			if (params->size() < 2)
 			{
 				return;
 			}
@@ -273,81 +308,97 @@ namespace Components
 			}
 			else
 			{
-				Party::Connect(Network::Address(params->get(1)));
+				Connect(Network::Address(params->get(1)));
 			}
 		});
-		Command::Add("reconnect", [](Command::Params*)
+
+		Command::Add("reconnect", []()
 		{
-			Party::Connect(Party::Container.target);
+			Connect(Container.target);
 		});
 
-		Scheduler::OnFrame([]()
+		if (!Dedicated::IsEnabled() && !ZoneBuilder::IsEnabled())
 		{
-			if (Party::Container.valid)
+			Scheduler::Loop([]
 			{
-				if ((Game::Sys_Milliseconds() - Party::Container.joinTime) > 10'000)
+				if (Container.valid)
 				{
-					Party::Container.valid = false;
-					Party::ConnectError("Server connection timed out.");
+					if ((Game::Sys_Milliseconds() - Container.joinTime) > 10'000)
+					{
+						Container.valid = false;
+						ConnectError("Server connection timed out.");
+					}
 				}
-			}
 
-			if (Party::Container.awaitingPlaylist)
-			{
-				if ((Game::Sys_Milliseconds() - Party::Container.requestTime) > 5'000)
+				if (Container.awaitingPlaylist)
 				{
-					Party::Container.awaitingPlaylist = false;
-					Party::ConnectError("Playlist request timed out.");
+					if ((Game::Sys_Milliseconds() - Container.requestTime) > 5'000)
+					{
+						Container.awaitingPlaylist = false;
+						ConnectError("Playlist request timed out.");
+					}
 				}
-			}
-		}, true);
+
+			}, Scheduler::Pipeline::CLIENT);
+		}
 
 		// Basic info handler
-		Network::Handle("getInfo", [](Network::Address address, const std::string& data)
+		Network::OnClientPacket("getInfo", [](const Network::Address& address, [[maybe_unused]] const std::string& data)
 		{
-			int botCount = 0;
-			int clientCount = 0;
-			int maxclientCount = *Game::svs_numclients;
+			auto botCount = 0;
+			auto effectiveClientCount = 0;
+			auto maxClientCount = *Game::svs_clientCount;
+			const auto securityLevel = Dvar::Var("sv_securityLevel").get<int>();
+			const auto* password = *Game::g_password ? (*Game::g_password)->current.string : "";
 
-			if (maxclientCount)
+			if (maxClientCount)
 			{
-				for (int i = 0; i < maxclientCount; ++i)
+				for (int i = 0; i < maxClientCount; ++i)
 				{
-					if (Game::svs_clients[i].state >= 3)
+					if (Game::svs_clients[i].header.state < Game::CS_ACTIVE) continue;
+					if (!Game::svs_clients[i].gentity || !Game::svs_clients[i].gentity->client) continue;
+
+					const auto* client = Game::svs_clients[i].gentity->client;
+					const auto team = client->sess.cs.team;
+					if (Game::svs_clients[i].bIsTestClient || team == Game::TEAM_SPECTATOR)
 					{
-						if (Game::svs_clients[i].isBot) ++botCount;
-						else ++clientCount;
+						++botCount;
+					}
+					else
+					{
+						++effectiveClientCount;
 					}
 				}
 			}
 			else
 			{
-				maxclientCount = Dvar::Var("party_maxplayers").get<int>();
-				//maxclientCount = Game::Party_GetMaxPlayers(*Game::partyIngame);
-				clientCount = Game::PartyHost_CountMembers(reinterpret_cast<Game::PartyData_s*>(0x1081C00));
+				maxClientCount = *Game::party_maxplayers ? (*Game::party_maxplayers)->current.integer : 18;
+				effectiveClientCount = Game::PartyHost_CountMembers(Game::g_lobbyData);
 			}
 
 			Utils::InfoString info;
 			info.set("challenge", Utils::ParseChallenge(data));
 			info.set("gamename", "IW4");
-			info.set("hostname", Dvar::Var("sv_hostname").get<const char*>());
-			info.set("gametype", Dvar::Var("g_gametype").get<const char*>());
-			info.set("fs_game", Dvar::Var("fs_game").get<const char*>());
+			info.set("hostname", (*Game::sv_hostname)->current.string);
+			info.set("gametype", (*Game::sv_gametype)->current.string);
+			info.set("fs_game", (*Game::fs_gameDirVar)->current.string);
 			info.set("xuid", Utils::String::VA("%llX", Steam::SteamUser()->GetSteamID().bits));
-			info.set("clients", Utils::String::VA("%i", clientCount));
-			info.set("bots", Utils::String::VA("%i", botCount));
-			info.set("sv_maxclients", Utils::String::VA("%i", maxclientCount));
-			info.set("protocol", Utils::String::VA("%i", PROTOCOL));
-			info.set("shortversion", SHORTVERSION);
-			info.set("checksum", Utils::String::VA("%d", Game::Sys_Milliseconds()));
-			info.set("mapname", Dvar::Var("mapname").get<const char*>());
-			info.set("isPrivate", (Dvar::Var("g_password").get<std::string>().size() ? "1" : "0"));
+			info.set("clients", std::to_string(effectiveClientCount));
+			info.set("bots", std::to_string(botCount));
+			info.set("sv_maxclients", std::to_string(maxClientCount));
+			info.set("protocol", std::to_string(PROTOCOL));
+			info.set("version", REVISION_STR);
+			info.set("checksum", std::to_string(Game::Sys_Milliseconds()));
+			info.set("mapname", Dvar::Var("mapname").get<std::string>());
+			info.set("isPrivate", *password ? "1" : "0");
 			info.set("hc", (Dvar::Var("g_hardcore").get<bool>() ? "1" : "0"));
-			info.set("securityLevel", Utils::String::VA("%i", Dvar::Var("sv_securityLevel").get<int>()));
-			info.set("sv_running", (Dvar::Var("sv_running").get<bool>() ? "1" : "0"));
+			info.set("securityLevel", std::to_string(securityLevel));
+			info.set("sv_running", (Dedicated::IsRunning() ? "1" : "0"));
+			info.set("aimAssist", (Gamepad::sv_allowAimAssist.get<bool>() ? "1" : "0"));
+			info.set("voiceChat", (Voice::SV_VoiceEnabled() ? "1" : "0"));
 
 			// Ensure mapname is set
-			if (info.get("mapname").empty() || Party::IsInLobby())
+			if (info.get("mapname").empty() || IsInLobby())
 			{
 				info.set("mapname", Dvar::Var("ui_mapname").get<const char*>());
 			}
@@ -356,14 +407,14 @@ namespace Components
 			{
 				info.set("usermaphash", Utils::String::VA("%i", Maps::GetUserMap()->getHash()));
 			}
-			else if (Party::IsInUserMapLobby())
+			else if (IsInUserMapLobby())
 			{
 				info.set("usermaphash", Utils::String::VA("%i", Maps::GetUsermapHash(info.get("mapname"))));
 			}
 
 			if (Dedicated::IsEnabled())
 			{
-				info.set("sv_motd", Dvar::Var("sv_motd").get<std::string>());
+				info.set("sv_motd", Dedicated::SVMOTD.get<std::string>());
 			}
 
 			// Set matchtype
@@ -371,7 +422,7 @@ namespace Components
 			// 1 - Party, use Steam_JoinLobby to connect
 			// 2 - Match, use CL_ConnectFromParty to connect
 
-			if (Dvar::Var("party_enable").get<bool>() && Dvar::Var("party_host").get<bool>()) // Party hosting
+			if (PartyEnable.get<bool>() && Dvar::Var("party_host").get<bool>()) // Party hosting
 			{
 				info.set("matchtype", "1");
 			}
@@ -384,83 +435,83 @@ namespace Components
 				info.set("matchtype", "0");
 			}
 
-			info.set("wwwDownload", (Dvar::Var("sv_wwwDownload").get<bool>() ? "1" : "0"));
-			info.set("wwwUrl", Dvar::Var("sv_wwwBaseUrl").get<std::string>());
+			info.set("wwwDownload", (Download::SV_wwwDownload.get<bool>() ? "1" : "0"));
+			info.set("wwwUrl", Download::SV_wwwBaseUrl.get<std::string>());
 
-			Network::SendCommand(address, "infoResponse", "\\" + info.build());
+			Network::SendCommand(address, "infoResponse", info.build());
 		});
 
-		Network::Handle("infoResponse", [](Network::Address address, const std::string& data)
+		Network::OnClientPacket("infoResponse", [](const Network::Address& address, [[maybe_unused]] const std::string& data)
 		{
-			Utils::InfoString info(data);
+			const Utils::InfoString info(data);
 
 			// Handle connection
-			if (Party::Container.valid)
+			if (Container.valid)
 			{
-				if (Party::Container.target == address)
+				if (Container.target == address)
 				{
 					// Invalidate handler for future packets
-					Party::Container.valid = false;
-					Party::Container.info = info;
+					Container.valid = false;
+					Container.info = info;
 
-					Party::Container.matchType = atoi(info.get("matchtype").data());
-					uint32_t securityLevel = static_cast<uint32_t>(atoi(info.get("securityLevel").data()));
+					Container.matchType = std::strtol(info.get("matchtype").data(), nullptr, 10);
+					auto securityLevel = std::strtoul(info.get("securityLevel").data(), nullptr, 10);
 					bool isUsermap = !info.get("usermaphash").empty();
-					unsigned int usermapHash = atoi(info.get("usermaphash").data());
-
-					std::string mod = Dvar::Var("fs_game").get<std::string>();
-
+					auto usermapHash = std::strtoul(info.get("usermaphash").data(), nullptr, 10);
+#ifdef CL_MOD_LOADING
+					std::string mod = (*Game::fs_gameDirVar)->current.string;
+#endif
 					// set fast server stuff here so its updated when we go to download stuff
 					if (info.get("wwwDownload") == "1"s)
 					{
-						Dvar::Var("sv_wwwDownload").set(true);
-						Dvar::Var("sv_wwwBaseUrl").set(info.get("wwwUrl"));
+						Download::SV_wwwDownload.set(true);
+						Download::SV_wwwBaseUrl.set(info.get("wwwUrl"));
 					}
 					else
 					{
-						Dvar::Var("sv_wwwDownload").set(false);
-						Dvar::Var("sv_wwwBaseUrl").set("");
+						Download::SV_wwwDownload.set(false);
+						Download::SV_wwwBaseUrl.set("");
 					}
 
-					if (info.get("challenge") != Party::Container.challenge)
+					if (info.get("challenge") != Container.challenge)
 					{
-						Party::ConnectError("Invalid join response: Challenge mismatch.");
+						ConnectError("Invalid join response: Challenge mismatch.");
 					}
 					else if (securityLevel > Auth::GetSecurityLevel())
 					{
-						//Party::ConnectError(Utils::VA("Your security level (%d) is lower than the server's (%d)", Auth::GetSecurityLevel(), securityLevel));
 						Command::Execute("closemenu popup_reconnectingtoparty");
 						Auth::IncreaseSecurityLevel(securityLevel, "reconnect");
 					}
-					else if (!Party::Container.matchType)
+					else if (!Container.matchType)
 					{
-						Party::ConnectError("Server is not hosting a match.");
+						ConnectError("Server is not hosting a match.");
 					}
-					else if (Party::Container.matchType > 2 || Party::Container.matchType < 0)
+					else if (Container.matchType > 2 || Container.matchType < 0)
 					{
-						Party::ConnectError("Invalid join response: Unknown matchtype");
+						ConnectError("Invalid join response: Unknown matchtype");
 					}
-					else if (Party::Container.info.get("mapname").empty() || Party::Container.info.get("gametype").empty())
+					else if (Container.info.get("mapname").empty() || Container.info.get("gametype").empty())
 					{
-						Party::ConnectError("Invalid map or gametype.");
+						ConnectError("Invalid map or gametype.");
 					}
-					else if (Party::Container.info.get("isPrivate") == "1"s && !Dvar::Var("password").get<std::string>().length())
+					else if (Container.info.get("isPrivate") == "1"s && Dvar::Var("password").get<std::string>().empty())
 					{
-						Party::ConnectError("A password is required to join this server! Set it at the bottom of the serverlist.");
+						ConnectError("A password is required to join this server! Set it at the bottom of the serverlist.");
 					}
 					else if (isUsermap && usermapHash != Maps::GetUsermapHash(info.get("mapname")))
 					{
 						Command::Execute("closemenu popup_reconnectingtoparty");
 						Download::InitiateMapDownload(info.get("mapname"), info.get("isPrivate") == "1");
 					}
+#ifdef CL_MOD_LOADING
 					else if (!info.get("fs_game").empty() && Utils::String::ToLower(mod) != Utils::String::ToLower(info.get("fs_game")))
 					{
 						Command::Execute("closemenu popup_reconnectingtoparty");
 						Download::InitiateClientDownload(info.get("fs_game"), info.get("isPrivate") == "1"s);
 					}
-					else if (!Dvar::Var("fs_game").get<std::string>().empty() && info.get("fs_game").empty())
+					else if ((*Game::fs_gameDirVar)->current.string[0] != '\0' && info.get("fs_game").empty())
 					{
-						Dvar::Var("fs_game").set("");
+						Game::Dvar_SetString(*Game::fs_gameDirVar, "");
 
 						if (Dvar::Var("cl_modVidRestart").get<bool>())
 						{
@@ -469,18 +520,19 @@ namespace Components
 
 						Command::Execute("reconnect", false);
 					}
+#endif
 					else
 					{
-						if (!Maps::CheckMapInstalled(Party::Container.info.get("mapname").data(), true)) return;
+						if (!Maps::CheckMapInstalled(Container.info.get("mapname"), true)) return;
 
-						Party::Container.motd = info.get("sv_motd");
+						Container.motd = TextRenderer::StripMaterialTextIcons(info.get("sv_motd"));
 
-						if (Party::Container.matchType == 1) // Party
+						if (Container.matchType == 1) // Party
 						{
 							// Send playlist request
-							Party::Container.requestTime = Game::Sys_Milliseconds();
-							Party::Container.awaitingPlaylist = true;
-							Network::SendCommand(Party::Container.target, "getplaylist", Dvar::Var("password").get<std::string>());
+							Container.requestTime = Game::Sys_Milliseconds();
+							Container.awaitingPlaylist = true;
+							Network::SendCommand(Container.target, "getplaylist", Dvar::Var("password").get<std::string>());
 
 							// This is not a safe method
 							// TODO: Fix actual error!
@@ -489,11 +541,25 @@ namespace Components
 								Command::Execute("disconnect", true);
 							}
 						}
-						else if (Party::Container.matchType == 2) // Match
+						else if (Container.matchType == 2) // Match
 						{
-							if (atoi(Party::Container.info.get("clients").data()) >= atoi(Party::Container.info.get("sv_maxclients").data()))
+							int clients;
+							int maxClients;
+
+							try
 							{
-								Party::ConnectError("@EXE_SERVERISFULL");
+								clients = std::stoi(Container.info.get("clients"));
+								maxClients = std::stoi(Container.info.get("sv_maxclients"));
+							}
+							catch ([[maybe_unused]] const std::exception& ex)
+							{
+								ConnectError("Invalid info string");
+								return;
+							}
+
+							if (clients >= maxClients)
+							{
+								ConnectError("@EXE_SERVERISFULL");
 							}
 							else
 							{
@@ -502,7 +568,7 @@ namespace Components
 								Game::Menus_CloseAll(Game::uiContext);
 
 								Game::_XSESSION_INFO hostInfo;
-								Game::CL_ConnectFromParty(0, &hostInfo, *Party::Container.target.get(), 0, 0, Party::Container.info.get("mapname").data(), Party::Container.info.get("gametype").data());
+								Game::CL_ConnectFromParty(0, &hostInfo, *Container.target.get(), 0, 0, Container.info.get("mapname").data(), Container.info.get("gametype").data());
 							}
 						}
 					}
@@ -512,10 +578,5 @@ namespace Components
 			ServerList::Insert(address, info);
 			Friends::UpdateServer(address, info.get("hostname"), info.get("mapname"));
 		});
-	}
-
-	Party::~Party()
-	{
-		Party::LobbyMap.clear();
 	}
 }

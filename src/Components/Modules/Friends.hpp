@@ -19,11 +19,13 @@ namespace Components
 		static void RequestPresence(SteamID user);
 		static std::string GetPresence(SteamID user, const std::string& key);
 
-		static void AddFriend(SteamID user);
-
 		static int GetGame(SteamID user);
 
 		static bool IsInvisible();
+
+		static Dvar::Var UIStreamFriendly;
+		static Dvar::Var CLAnonymous;
+		static Dvar::Var CLNotifyFriendState;
 
 	private:
 #pragma pack(push, 4)
@@ -73,14 +75,13 @@ namespace Components
 		static std::recursive_mutex Mutex;
 		static std::vector<Friend> FriendsList;
 
-		static void DisconnectStub();
 		static void ClearServer();
 		static void SetServer();
 
 		static bool IsClientInParty(int controller, int clientNum);
 
 		static void UpdateUserInfo(SteamID user);
-		static void UpdateState(bool force = false);
+		static void UpdateState();
 
 		static void SortList(bool force = false);
 		static void SortIndividualList(std::vector<Friend>* list);

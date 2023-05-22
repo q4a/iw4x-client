@@ -1,17 +1,27 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "Bans.hpp"
+#include "Events.hpp"
 
 namespace Components
 {
-	std::recursive_mutex Bans::AccessMutex;
+	const char* Bans::BanListFile = "userraw/bans.json";
 
-	bool Bans::IsBanned(Bans::Entry entry)
+	// Have only one instance of IW4x read/write the file
+	std::unique_lock<Utils::NamedMutex> Bans::Lock()
 	{
-		Bans::BanList list;
-		Bans::LoadBans(&list);
+		static Utils::NamedMutex mutex{ "iw4x-ban-list-lock" };
+		std::unique_lock lock{mutex};
+		return lock;
+	}
+
+	bool Bans::IsBanned(const banEntry& entry)
+	{
+		BanList list;
+		LoadBans(&list);
 
 		if (entry.first.bits)
 		{
-			for (auto& idEntry : list.idList)
+			for (const auto& idEntry : list.idList)
 			{
 				if (idEntry.bits == entry.first.bits)
 				{
@@ -22,7 +32,7 @@ namespace Components
 
 		if (entry.second.full)
 		{
-			for (auto& ipEntry : list.ipList)
+			for (const auto& ipEntry : list.ipList)
 			{
 				if (ipEntry.full == entry.second.full)
 				{
@@ -34,17 +44,15 @@ namespace Components
 		return false;
 	}
 
-	void Bans::InsertBan(Bans::Entry entry)
+	void Bans::InsertBan(const banEntry& entry)
 	{
-		std::lock_guard<std::recursive_mutex> _(Bans::AccessMutex);
-
-		Bans::BanList list;
-		Bans::LoadBans(&list);
+		BanList list;
+		LoadBans(&list);
 
 		if (entry.first.bits)
 		{
 			bool found = false;
-			for (auto& idEntry : list.idList)
+			for (const auto& idEntry : list.idList)
 			{
 				if (idEntry.bits == entry.first.bits)
 				{
@@ -62,7 +70,7 @@ namespace Components
 		if (entry.second.full)
 		{
 			bool found = false;
-			for (auto& ipEntry : list.ipList)
+			for (const auto& ipEntry : list.ipList)
 			{
 				if (ipEntry.full == entry.second.full)
 				{
@@ -77,125 +85,124 @@ namespace Components
 			}
 		}
 
-		Bans::SaveBans(&list);
+		SaveBans(&list);
 	}
 
-	void Bans::SaveBans(BanList* list)
+	void Bans::SaveBans(const BanList* list)
 	{
-		std::lock_guard<std::recursive_mutex> _(Bans::AccessMutex);
+		assert(list);
+
+		const auto _ = Lock();
 
 		std::vector<std::string> idVector;
 		std::vector<std::string> ipVector;
 
-		for (auto& idEntry : list->idList)
+		for (const auto& idEntry : list->idList)
 		{
-			idVector.push_back(Utils::String::VA("%llX", idEntry.bits));
+			idVector.emplace_back(Utils::String::VA("%llX", idEntry.bits));
 		}
 
-		for (auto& ipEntry : list->ipList)
+		for (const auto& ipEntry : list->ipList)
 		{
-			ipVector.push_back(Utils::String::VA("%u.%u.%u.%u",
+			ipVector.emplace_back(Utils::String::VA("%u.%u.%u.%u",
 				ipEntry.bytes[0] & 0xFF,
 				ipEntry.bytes[1] & 0xFF,
 				ipEntry.bytes[2] & 0xFF,
-				ipEntry.bytes[3] & 0xFF));
+				ipEntry.bytes[3] & 0xFF)
+			);
 		}
 
-		json11::Json bans = json11::Json::object
+		const nlohmann::json bans = nlohmann::json
 		{
 			{ "ip", ipVector },
 			{ "id", idVector },
 		};
 
-		FileSystem::FileWriter ban("bans.json");
-		ban.write(bans.dump());
+		Utils::IO::WriteFile(BanListFile, bans.dump());
 	}
 
-	void Bans::LoadBans(Bans::BanList* list)
+	void Bans::LoadBans(BanList* list)
 	{
-		std::lock_guard<std::recursive_mutex> _(Bans::AccessMutex);
+		assert(list);
 
-		FileSystem::File bans("bans.json");
+		const auto _ = Lock();
 
-		if (bans.exists())
+		const auto bans = Utils::IO::ReadFile(BanListFile);
+		if (bans.empty())
 		{
-			std::string error;
-			json11::Json banData = json11::Json::parse(bans.getBuffer(), error);
-
-			if (!error.empty())
-			{
-				Logger::Error("Failed to parse bans (bans.json): %s", error.data());
-			}
-
-			if (!list) return;
-
-			if (banData.is_object())
-			{
-				auto idList = banData["id"];
-				auto ipList = banData["ip"];
-
-				if (idList.is_array())
-				{
-					for (auto &idEntry : idList.array_items())
-					{
-						if (idEntry.is_string())
-						{
-							SteamID id;
-							id.bits = strtoull(idEntry.string_value().data(), nullptr, 16);
-
-							list->idList.push_back(id);
-						}
-					}
-				}
-
-				if (ipList.is_array())
-				{
-					for (auto &ipEntry : ipList.array_items())
-					{
-						if (ipEntry.is_string())
-						{
-							Network::Address addr(ipEntry.string_value());
-
-							list->ipList.push_back(addr.getIP());
-						}
-					}
-				}
-			}
-		}
-	}
-
-	void Bans::BanClientNum(int num, const std::string& reason)
-	{
-		if (!Dvar::Var("sv_running").get<bool>())
-		{
-			Logger::Print("Server is not running.\n");
+			Logger::Debug("bans.json does not exist");
 			return;
 		}
 
-		if (*Game::svs_numclients <= num)
+		nlohmann::json banData;
+		try
 		{
-			Logger::Print("Player %d is not on the server\n", num);
+			banData = nlohmann::json::parse(bans);
+		}
+		catch (const std::exception& ex)
+		{
+			Logger::PrintError(Game::CON_CHANNEL_ERROR, "JSON Parse Error: {}\n", ex.what());
 			return;
 		}
 
-		Game::client_t* client = &Game::svs_clients[num];
+		if (!banData.contains("id") || !banData.contains("ip"))
+		{
+			Logger::PrintError(Game::CON_CHANNEL_ERROR, "bans.json contains invalid data\n");
+			return;
+		}
 
+		const auto& idList = banData["id"];
+		const auto& ipList = banData["ip"];
+
+		if (idList.is_array())
+		{
+			const nlohmann::json::array_t arr = idList;
+
+			for (auto &idEntry : arr)
+			{
+				if (idEntry.is_string())
+				{
+					SteamID id;
+					auto guid = idEntry.get<std::string>();
+					id.bits = std::strtoull(guid.data(), nullptr, 16);
+
+					list->idList.push_back(id);
+				}
+			}
+		}
+
+		if (ipList.is_array())
+		{
+			const nlohmann::json::array_t arr = ipList;
+
+			for (auto &ipEntry : arr)
+			{
+				if (ipEntry.is_string())
+				{
+					Network::Address addr(ipEntry.get<std::string>());
+
+					list->ipList.push_back(addr.getIP());
+				}
+			}
+		}
+	}
+
+	void Bans::BanClient(Game::client_s* cl, const std::string& reason)
+	{
 		SteamID guid;
-		guid.bits = client->steamID;
+		guid.bits = cl->steamID;
 
-		Bans::InsertBan({ guid, client->netchan.remoteAddress.ip });
+		InsertBan({ guid, cl->header.netchan.remoteAddress.ip });
 
-		Game::SV_KickClientError(client, reason);
+		Game::SV_DropClient(cl, reason.data(), true);
 	}
 
 	void Bans::UnbanClient(SteamID id)
 	{
-		std::lock_guard<std::recursive_mutex> _(Bans::AccessMutex);
+		BanList list;
+		LoadBans(&list);
 
-		Bans::BanList list;
-		Bans::LoadBans(&list);
-
-		auto entry = std::find_if(list.idList.begin(), list.idList.end(), [&id](SteamID& entry)
+		const auto entry = std::find_if(list.idList.begin(), list.idList.end(), [&id](const SteamID& entry)
 		{
 			return id.bits == entry.bits;
 		});
@@ -205,17 +212,15 @@ namespace Components
 			list.idList.erase(entry);
 		}
 
-		Bans::SaveBans(&list);
+		SaveBans(&list);
 	}
 
 	void Bans::UnbanClient(Game::netIP_t ip)
 	{
-		std::lock_guard<std::recursive_mutex> _(Bans::AccessMutex);
+		BanList list;
+		LoadBans(&list);
 
-		Bans::BanList list;
-		Bans::LoadBans(&list);
-
-		auto entry = std::find_if(list.ipList.begin(), list.ipList.end(), [&ip](Game::netIP_t& entry)
+		const auto entry = std::find_if(list.ipList.begin(), list.ipList.end(), [&ip](const Game::netIP_t& entry)
 		{
 			return ip.full == entry.full;
 		});
@@ -225,56 +230,97 @@ namespace Components
 			list.ipList.erase(entry);
 		}
 
-		Bans::SaveBans(&list);
+		SaveBans(&list);
 	}
 
-	Bans::Bans()
+	void Bans::AddServerCommands()
 	{
-		Command::Add("banclient", [](Command::Params* params)
+		Command::AddSV("banClient", [](const Command::Params* params)
 		{
-			if (params->length() < 2) return;
+			if (!Dedicated::IsRunning())
+			{
+				Logger::Print("Server is not running.\n");
+				return;
+			}
 
-			std::string reason = "EXE_ERR_BANNED_PERM";
-			if (params->length() >= 3) reason = params->join(2);
+			if (params->size() < 2)
+			{
+				Logger::Print("{} <client number> : permanently ban a client\n", params->get(0));
+				return;
+			}
 
-			Bans::BanClientNum(atoi(params->get(1)), reason);
+			const auto* input = params->get(1);
+
+			for (auto i = 0; input[i] != '\0'; ++i)
+			{
+				if (input[i] < '0' || input[i] > '9')
+				{
+					Logger::Print("Bad slot number: {}\n", input);
+					return;
+				}
+			}
+
+			const auto clientNum = std::strtoul(input, nullptr, 10);
+			if (clientNum >= Game::MAX_CLIENTS)
+			{
+				Logger::Print("Bad client slot: {}\n", clientNum);
+				return;
+			}
+
+			auto* cl = &Game::svs_clients[clientNum];
+			if (cl->header.state < Game::CS_ACTIVE)
+			{
+				Logger::Print("Client {} is not active\n", clientNum);
+				return;
+			}
+
+			if (cl->bIsTestClient)
+			{
+				return;
+			}
+
+			const auto reason = params->size() < 3 ? "EXE_ERR_BANNED_PERM"s : params->join(2);
+			BanClient(cl, reason);
 		});
 
-		Command::Add("unbanclient", [](Command::Params* params)
+		Command::AddSV("unbanClient", [](const Command::Params* params)
 		{
-			if (params->length() < 2) return;
+			if (!Dedicated::IsRunning())
+			{
+				Logger::Print("Server is not running.\n");
+				return;
+			}
 
-			std::string type = params->get(1);
+			if (params->size() < 3)
+			{
+				Logger::Print("{} <type> <ip or guid>\n", params->get(0));
+				return;
+			}
+
+			const auto* type = params->get(1);
 
 			if (type == "ip"s)
 			{
 				Network::Address address(params->get(2));
-				Bans::UnbanClient(address.getIP());
+				UnbanClient(address.getIP());
 
-				Logger::Print("Unbanned IP %s\n", params->get(2));
+				Logger::Print("Unbanned IP {}\n", params->get(2));
 
 			}
 			else if (type == "guid"s)
 			{
 				SteamID id;
-				id.bits = strtoull(params->get(2), nullptr, 16);
+				id.bits = std::strtoull(params->get(2), nullptr, 16);
 
-				Bans::UnbanClient(id);
+				UnbanClient(id);
 
-				Logger::Print("Unbanned GUID %s\n", params->get(2));
+				Logger::Print("Unbanned GUID {}\n", params->get(2));
 			}
-		});
-
-		// Verify the list on startup
-		Scheduler::Once([]()
-		{
-			Bans::BanList list;
-			Bans::LoadBans(&list);
 		});
 	}
 
-	Bans::~Bans()
+	Bans::Bans()
 	{
-
+		Events::OnSVInit(AddServerCommands);
 	}
 }

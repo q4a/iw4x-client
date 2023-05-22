@@ -1,10 +1,16 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+
+#include <zlib.h>
+
+#include "FastFiles.hpp"
 
 namespace Components
 {
 	FastFiles::Key FastFiles::CurrentKey;
 	symmetric_CTR FastFiles::CurrentCTR;
 	std::vector<std::string> FastFiles::ZonePaths;
+
+	Dvar::Var FastFiles::g_loadingInitialZones;
 
 	bool FastFiles::IsIW4xZone = false;
 	bool FastFiles::StreamRead = false;
@@ -129,8 +135,10 @@ namespace Components
 
 
 	// This has to be called only once, when the game starts
-	void FastFiles::LoadInitialZones(Game::XZoneInfo *zoneInfo, unsigned int zoneCount, int sync)
+	void FastFiles::LoadInitialZones(Game::XZoneInfo* zoneInfo, unsigned int zoneCount, int sync)
 	{
+		g_loadingInitialZones.set(true);
+
 		std::vector<Game::XZoneInfo> data;
 		Utils::Merge(&data, zoneInfo, zoneCount);
 
@@ -148,7 +156,7 @@ namespace Components
 	}
 
 	// This has to be called every time the cgame is reinitialized
-	void FastFiles::LoadDLCUIZones(Game::XZoneInfo *zoneInfo, unsigned int zoneCount, int sync)
+	void FastFiles::LoadDLCUIZones(Game::XZoneInfo* zoneInfo, unsigned int zoneCount, int sync)
 	{
 		std::vector<Game::XZoneInfo> data;
 		Utils::Merge(&data, zoneInfo, zoneCount);
@@ -173,7 +181,7 @@ namespace Components
 		return FastFiles::LoadLocalizeZones(data.data(), data.size(), sync);
 	}
 
-	void FastFiles::LoadGfxZones(Game::XZoneInfo *zoneInfo, unsigned int zoneCount, int sync)
+	void FastFiles::LoadGfxZones(Game::XZoneInfo* zoneInfo, unsigned int zoneCount, int sync)
 	{
 		std::vector<Game::XZoneInfo> data;
 		Utils::Merge(&data, zoneInfo, zoneCount);
@@ -187,7 +195,7 @@ namespace Components
 	}
 
 	// This has to be called every time fastfiles are loaded :D
-	void FastFiles::LoadLocalizeZones(Game::XZoneInfo *zoneInfo, unsigned int zoneCount, int sync)
+	void FastFiles::LoadLocalizeZones(Game::XZoneInfo* zoneInfo, unsigned int zoneCount, int sync)
 	{
 		std::vector<Game::XZoneInfo> data;
 		Utils::Merge(&data, zoneInfo, zoneCount);
@@ -209,6 +217,11 @@ namespace Components
 		data.push_back(info);
 
 		Game::DB_LoadXAssets(data.data(), data.size(), sync);
+
+		Scheduler::OnGameInitialized([]
+		{
+			g_loadingInitialZones.set(false);
+		}, Scheduler::Pipeline::MAIN);
 	}
 
 	// Name is a bit weird, due to FasFileS and ExistS :P
@@ -232,13 +245,14 @@ namespace Components
 
 	const char* FastFiles::GetZoneLocation(const char* file)
 	{
-		const char* dir = Dvar::Var("fs_basepath").get<const char*>();
+		const auto* dir = (*Game::fs_basepath)->current.string;
 
 		std::vector<std::string> paths;
-		std::string modDir = Dvar::Var("fs_game").get<std::string>();
-		if ((file == "mod"s || file == "mod.ff"s) && !modDir.empty())
+		const std::string fsGame = (*Game::fs_gameDirVar)->current.string;
+
+		if ((file == "mod"s || file == "mod.ff"s) && !fsGame.empty())
 		{
-			paths.push_back(Utils::String::VA("%s\\", modDir.data()));
+			paths.push_back(std::format("{}\\", fsGame));
 		}
 
 		if (Utils::String::StartsWith(file, "mp_"))
@@ -256,17 +270,17 @@ namespace Components
 				Utils::String::Replace(zone, "_load", "");
 			}
 
-			if (Utils::IO::FileExists(Utils::String::VA("usermaps\\%s\\%s.ff", zone.data(), filename.data())))
+			if (Utils::IO::FileExists(std::format("usermaps\\{}\\{}.ff", zone, filename)))
 			{
-				return Utils::String::VA("usermaps\\%s\\", zone.data());
+				return Utils::String::Format("usermaps\\{}\\", zone);
 			}
 		}
 
 		Utils::Merge(&paths, FastFiles::ZonePaths);
 
-		for (auto &path : paths)
+		for (auto& path : paths)
 		{
-			std::string absoluteFile = Utils::String::VA("%s\\%s%s", dir, path.data(), file);
+			auto absoluteFile = std::format("{}\\{}{}", dir, path, file);
 
 			// No ".ff" appended, append it manually
 			if (!Utils::String::EndsWith(absoluteFile, ".ff"))
@@ -277,11 +291,11 @@ namespace Components
 			// Check if FastFile exists
 			if (Utils::IO::FileExists(absoluteFile))
 			{
-				return Utils::String::VA("%s", path.data());
+				return Utils::String::Format("{}", path);
 			}
 		}
 
-		return Utils::String::VA("zone\\%s\\", Game::Win_GetLanguage());
+		return Utils::String::Format("zone\\{}\\", Game::Win_GetLanguage());
 	}
 
 	void FastFiles::AddZonePath(const std::string& path)
@@ -327,7 +341,7 @@ namespace Components
 
 		if (*version != XFILE_VERSION)
 		{
-			Logger::Error("Zone version %d is not supported!", Zones::Version());
+			Logger::Error(Game::ERR_FATAL, "Zone version {} is not supported!", Zones::Version());
 		}
 	}
 
@@ -343,11 +357,11 @@ namespace Components
 
 			if (header[1] < XFILE_VERSION_IW4X)
 			{
-				Logger::Error("The fastfile you are trying to load is outdated (%d, expected %d)", header[1], XFILE_VERSION_IW4X);
+				Logger::Error(Game::ERR_FATAL, "The fastfile you are trying to load is outdated ({}, expected {})", header[1], XFILE_VERSION_IW4X);
 			}
 			else if (header[1] > XFILE_VERSION_IW4X)
 			{
-				Logger::Error("You are loading a fastfile that is too new (%d, expected %d), update your game or rebuild the fastfile", header[1], XFILE_VERSION_IW4X);
+				Logger::Error(Game::ERR_FATAL, "You are loading a fastfile that is too new ({}, expected {}), update your game or rebuild the fastfile", header[1], XFILE_VERSION_IW4X);
 			}
 
 			*reinterpret_cast<unsigned __int64*>(header) = XFILE_MAGIC_UNSIGNED;
@@ -389,7 +403,7 @@ namespace Components
 		return Utils::Hook::Call<int(unsigned char*, int, unsigned char*)>(0x5BA240)(buffer, length, ivValue);
 	}
 
-	int FastFiles::InflateInitDecrypt(z_streamp strm, const char *version, int stream_size)
+	static int InflateInitDecrypt(z_streamp strm, const char* version, int stream_size)
 	{
 		if (Zones::Version() >= 319)
 		{
@@ -397,7 +411,6 @@ namespace Components
 		}
 
 		return Utils::Hook::Call<int(z_streamp, const char*, int)>(0x4D8090)(strm, version, stream_size);
-		//return inflateInit_(strm, version, stream_size);
 	}
 
 	void FastFiles::AuthLoadInflateDecryptBaseFunc(unsigned char* buffer)
@@ -432,7 +445,7 @@ namespace Components
 		return std::min(partialProgress + (currentProgress * singleProgress), 1.0f);
 	}
 
-	void FastFiles::LoadZonesStub(Game::XZoneInfo *zoneInfo, unsigned int zoneCount)
+	void FastFiles::LoadZonesStub(Game::XZoneInfo* zoneInfo, unsigned int zoneCount)
 	{
 		FastFiles::CurrentZone = 0;
 		FastFiles::MaxZones = zoneCount;
@@ -495,7 +508,8 @@ namespace Components
 
 	FastFiles::FastFiles()
 	{
-		Dvar::Register<bool>("ui_zoneDebug", false, Game::dvar_flag::DVAR_FLAG_SAVED, "Display current loaded zone.");
+		Dvar::Register<bool>("ui_zoneDebug", false, Game::DVAR_ARCHIVE, "Display current loaded zone.");
+		g_loadingInitialZones = Dvar::Register<bool>("g_loadingInitialZones", true, Game::DVAR_NONE, "Is loading initial zones");
 
 		// Fix XSurface assets
 		Utils::Hook(0x0048E8A5, FastFiles::Load_XSurfaceArray, HOOK_CALL).install()->quick();
@@ -546,7 +560,7 @@ namespace Components
 		Utils::Hook(0x4D02F0, FastFiles::AuthLoadInitCrypto, HOOK_CALL).install()->quick();
 
 		// Initial stage decryption
-		Utils::Hook(0x4D0306, FastFiles::InflateInitDecrypt, HOOK_CALL).install()->quick();
+		Utils::Hook(0x4D0306, InflateInitDecrypt, HOOK_CALL).install()->quick();
 
 		// Hash bit decryption
 		Utils::Hook(0x5B9958, FastFiles::AuthLoadInflateCompare, HOOK_CALL).install()->quick();
@@ -569,32 +583,35 @@ namespace Components
 		FastFiles::AddZonePath("zone\\patch\\");
 		FastFiles::AddZonePath("zone\\dlc\\");
 
-		Scheduler::OnFrame([]()
+		if (!Dedicated::IsEnabled() && !ZoneBuilder::IsEnabled())
 		{
-			if (FastFiles::Current().empty() || !Dvar::Var("ui_zoneDebug").get<bool>()) return;
-
-			Game::Font_s* font = Game::R_RegisterFont("fonts/consoleFont", 0);
-			float color[4] = { 1.0f, 1.0f, 1.0f, (Game::CL_IsCgameInitialized() ? 0.3f : 1.0f) };
-
-			std::uint32_t FFTotalSize = *reinterpret_cast<std::uint32_t*>(0x10AA5D8);
-			std::uint32_t FFCurrentOffset = *reinterpret_cast<std::uint32_t*>(0x10AA608);
-
-			float fastfileLoadProgress = (float(FFCurrentOffset) / float(FFTotalSize)) * 100.0f;
-			if (fastfileLoadProgress == INFINITY)
+			Scheduler::Loop([]
 			{
-				fastfileLoadProgress = 100.0f;
-			}
-			else if (fastfileLoadProgress == NAN)
-			{
-				fastfileLoadProgress = 0.0f;
-			}
+				if (FastFiles::Current().empty() || !Dvar::Var("ui_zoneDebug").get<bool>()) return;
 
-			Game::R_AddCmdDrawText(Utils::String::VA("Loading FastFile: %s [%0.1f%%]", FastFiles::Current().data(), fastfileLoadProgress), 0x7FFFFFFF, font, 5.0f, static_cast<float>(Renderer::Height() - 5), 1.0f, 1.0f, 0.0f, color, Game::ITEM_TEXTSTYLE_NORMAL);
-		}, true);
+				auto* const font = Game::R_RegisterFont("fonts/consoleFont", 0);
+				float color[4] = { 1.0f, 1.0f, 1.0f, (Game::CL_IsCgameInitialized() ? 0.3f : 1.0f) };
 
-		Command::Add("loadzone", [](Command::Params* params)
+				auto FFTotalSize = *reinterpret_cast<std::uint32_t*>(0x10AA5D8);
+				auto FFCurrentOffset = *reinterpret_cast<std::uint32_t*>(0x10AA608);
+
+				float fastfileLoadProgress = (float(FFCurrentOffset) / float(FFTotalSize)) * 100.0f;
+				if (std::isinf(fastfileLoadProgress))
+				{
+					fastfileLoadProgress = 100.0f;
+				}
+				else if (std::isnan(fastfileLoadProgress))
+				{
+					fastfileLoadProgress = 0.0f;
+				}
+
+				Game::R_AddCmdDrawText(Utils::String::VA("Loading FastFile: %s [%0.1f%%]", FastFiles::Current().data(), fastfileLoadProgress), std::numeric_limits<int>::max(), font, 5.0f, static_cast<float>(Renderer::Height() - 5), 1.0f, 1.0f, 0.0f, color, Game::ITEM_TEXTSTYLE_NORMAL);
+			}, Scheduler::Pipeline::RENDERER);
+		}
+
+		Command::Add("loadzone", [](const Command::Params* params)
 		{
-			if (params->length() < 2) return;
+			if (params->size() < 2) return;
 
 			Game::XZoneInfo info;
 			info.name = params->get(1);
@@ -604,27 +621,22 @@ namespace Components
 			Game::DB_LoadXAssets(&info, 1, true);
 		});
 
-		Command::Add("awaitDatabase", [](Command::Params*)
+		Command::Add("awaitDatabase", []()
 		{
 			Logger::Print("Waiting for database...\n");
 			while (!Game::Sys_IsDatabaseReady()) std::this_thread::sleep_for(100ms);
 		});
 
-#ifdef DEBUG
+#ifdef _DEBUG
 		// ZoneBuilder debugging
 		Utils::IO::WriteFile("userraw/logs/iw4_reads.log", "", false);
 		Utils::Hook(0x4A8FA0, FastFiles::LogStreamRead, HOOK_JUMP).install()->quick();
-		Utils::Hook(0x4BCB62, []()
+		Utils::Hook(0x4BCB62, []
 		{
 			FastFiles::StreamRead = true;
 			Utils::Hook::Call<void(bool)>(0x4B8DB0)(true); // currently set to Load_GfxWorld
 			FastFiles::StreamRead = false;
 		}, HOOK_CALL).install()/*->quick()*/;
 #endif
-	}
-
-	FastFiles::~FastFiles()
-	{
-		FastFiles::ZonePaths.clear();
 	}
 }

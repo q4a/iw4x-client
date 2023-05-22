@@ -5,27 +5,17 @@ namespace Components
 	class Dvar : public Component
 	{
 	public:
-		class Flag
-		{
-		public:
-			Flag(Game::dvar_flag flag) : val(flag) {};
-			Flag(int flag) : Flag(static_cast<Game::dvar_flag>(flag)) {};
-
-			Game::dvar_flag val;
-		};
-
 		class Var
 		{
 		public:
-			Var() : dvar(nullptr) {};
-			Var(const Var &obj) { this->dvar = obj.dvar; };
-			Var(Game::dvar_t* _dvar) : dvar(_dvar) {};
-			Var(DWORD ppdvar) : Var(*reinterpret_cast<Game::dvar_t**>(ppdvar)) {};
+			Var() : dvar_(nullptr) {}
+			Var(const Var& obj) { this->dvar_ = obj.dvar_; }
+			Var(Game::dvar_t* dvar) : dvar_(dvar) {}
+			Var(DWORD ppdvar) : Var(*reinterpret_cast<Game::dvar_t**>(ppdvar)) {}
 			Var(const std::string& dvarName);
 
 			template<typename T> T get();
 
-			void set(char* string);
 			void set(const char* string);
 			void set(const std::string& string);
 
@@ -38,24 +28,33 @@ namespace Components
 			void setRaw(bool enabled);
 
 		private:
-			Game::dvar_t* dvar;
+			Game::dvar_t* dvar_;
 		};
 
 		Dvar();
-		~Dvar();
-
-		static void OnInit(Utils::Slot<Scheduler::Callback> callback);
 
 		// Only strings and bools use this type of declaration
-		template<typename T> static Var Register(const char* name, T value, Flag flag, const char* description);
-		template<typename T> static Var Register(const char* name, T value, T min, T max, Flag flag, const char* description);
+		template<typename T> static Var Register(const char* dvarName, T value, std::uint16_t flag, const char* description);
+		template<typename T> static Var Register(const char* dvarName, T value, T min, T max, std::uint16_t flag, const char* description);
+
+		static Var Name;
 
 	private:
-		static Utils::Signal<Scheduler::Callback> RegistrationSignal;
 
-		static Game::dvar_t* RegisterName(const char* name, const char* defaultVal, Game::dvar_flag flag, const char* description);
+		static const Game::dvar_t* Dvar_RegisterName(const char* dvarName, const char* value, std::uint16_t flags, const char* description);
+		static const Game::dvar_t* Dvar_RegisterSVNetworkFps(const char* dvarName, int value, int min, int max, std::uint16_t flags, const char* description);
+		static const Game::dvar_t* Dvar_RegisterPerkExtendedMeleeRange(const char* dvarName, float value, float min, float max, std::uint16_t flags, const char* description);
 
-		static Game::dvar_t* SetFromStringByNameExternal(const char* dvar, const char* value);
-		static Game::dvar_t* SetFromStringByNameSafeExternal(const char* dvar, const char* value);
+		static void SetFromStringByNameExternal(const char* dvarName, const char* string);
+		static void SetFromStringByNameSafeExternal(const char* dvarName, const char* string);
+
+		static bool AreArchiveDvarsUnprotected();
+		static bool IsSettingDvarsDisabled();
+		static void DvarSetFromStringByName_Stub(const char* dvarName, const char* value);
+
+		static void OnRegisterVariant(Game::dvar_t* dvar);
+		static void Dvar_RegisterVariant_Stub();
+
+		static const char* Dvar_EnumToString_Stub(const Game::dvar_t* dvar);
 	};
 }

@@ -1,43 +1,11 @@
-#include "STDInclude.hpp"
-
-#define IW4X_LIGHT_VERSION "0"
+#include <STDInclude.hpp>
+#include "IGfxLightDef.hpp"
 
 namespace Assets
 {
 	void IGfxLightDef::load(Game::XAssetHeader* header, const std::string& name, Components::ZoneBuilder::Zone* builder)
 	{
-		Components::FileSystem::File mapFile(Utils::String::VA("lights/%s.iw4xLight", name.data()));
-
-		if (mapFile.exists())
-		{
-			Utils::Stream::Reader reader(builder->getAllocator(), mapFile.getBuffer());
-
-			char* magic = reader.readArray<char>(7);
-			if (std::memcmp(magic, "IW4xLit", 7))
-			{
-				Components::Logger::Error(0, "Reading light '%s' failed, header is invalid!", name.data());
-			}
-
-			std::string version;
-			version.push_back(reader.read<char>());
-			if (version != IW4X_LIGHT_VERSION)
-			{
-				Components::Logger::Error("Reading light '%s' failed, expected version is %d, but it was %d!", name.data(), atoi(IW4X_LIGHT_VERSION), atoi(version.data()));
-			}
-
-			Game::GfxLightDef* asset = reader.readObject<Game::GfxLightDef>();
-			header->lightDef = asset;
-
-			if (asset->name)
-			{
-				asset->name = reader.readCString();
-			}
-
-			if (asset->attenuation.image)
-			{
-				asset->attenuation.image = Components::AssetHandler::FindAssetForZone(Game::XAssetType::ASSET_TYPE_IMAGE, reader.readString().data(), builder).image;
-			}
-		}
+		header->lightDef = builder->getIW4OfApi()->read<Game::GfxLightDef>(Game::XAssetType::ASSET_TYPE_LIGHT_DEF, name);
 	}
 
 	void IGfxLightDef::mark(Game::XAssetHeader header, Components::ZoneBuilder::Zone* builder)

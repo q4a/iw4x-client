@@ -1,4 +1,7 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "IGameWorldMp.hpp"
+
+#define IW4X_GAMEWORLD_VERSION 1
 
 namespace Assets
 {
@@ -73,5 +76,10 @@ namespace Assets
 		}
 
 		buffer->popBlock();
+	}
+
+	void IGameWorldMp::load(Game::XAssetHeader* header, const std::string& _name, Components::ZoneBuilder::Zone* builder)
+	{
+		header->gameWorldMp = builder->getIW4OfApi()->read<Game::GameWorldMp>(Game::XAssetType::ASSET_TYPE_GAMEWORLD_MP, _name);
 	}
 }

@@ -5,28 +5,37 @@ namespace Utils
 	class Library
 	{
 	public:
-		static Library Load(const std::string& name);
 		static Library Load(const std::filesystem::path& path);
 		static Library GetByAddress(void* address);
 
-		Library() : _module(nullptr), freeOnDestroy(false) {};
-		Library(const std::string& buffer, bool freeOnDestroy);
-		explicit Library(const std::string& name);
+		Library() : module_(nullptr), freeOnDestroy_(false) {}
+		Library(const std::string& name, bool freeOnDestroy);
+		explicit Library(const std::string& name) : module_(GetModuleHandleA(name.data())), freeOnDestroy_(true) {}
 		explicit Library(HMODULE handle);
 		~Library();
 
-		bool isValid() const;
-		HMODULE getModule();
+		bool operator!=(const Library& obj) const { return !(*this == obj); }
+		bool operator==(const Library& obj) const;
+
+		operator bool() const;
+		operator HMODULE() const;
+
+		[[nodiscard]] bool isValid() const;
+		[[nodiscard]] HMODULE getModule() const;
+		[[nodiscard]] std::string getName() const;
+		[[nodiscard]] std::filesystem::path getPath() const;
+		[[nodiscard]] std::filesystem::path getFolder() const;
+		void free();
 
 		template <typename T>
-		T getProc(const std::string& process) const
+		[[nodiscard]] T getProc(const std::string& process) const
 		{
 			if (!this->isValid()) T{};
-			return reinterpret_cast<T>(GetProcAddress(this->_module, process.data()));
+			return reinterpret_cast<T>(GetProcAddress(this->module_, process.data()));
 		}
 
 		template <typename T>
-		std::function<T> get(const std::string& process) const
+		[[nodiscard]] std::function<T> get(const std::string& process) const
 		{
 			if (!this->isValid()) return std::function<T>();
 			return static_cast<T*>(this->getProc<void*>(process));
@@ -56,10 +65,10 @@ namespace Utils
 			return T();
 		}
 
-		void free();
+		static void LaunchProcess(const std::string& process, const std::string& commandLine, const std::string& currentDir);
 
 	private:
-		HMODULE _module;
-		bool freeOnDestroy;
+		HMODULE module_;
+		bool freeOnDestroy_;
 	};
 }

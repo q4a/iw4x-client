@@ -1,10 +1,11 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "StructuredData.hpp"
 
 namespace Components
 {
 	Utils::Memory::Allocator StructuredData::MemAllocator;
 
-	const char* StructuredData::EnumTranslation[ENUM_MAX] =
+	const char* StructuredData::EnumTranslation[COUNT] =
 	{
 		"features",
 		"weapons",
@@ -23,7 +24,7 @@ namespace Components
 
 	void StructuredData::PatchPlayerDataEnum(Game::StructuredDataDef* data, StructuredData::PlayerDataType type, std::vector<std::string>& entries)
 	{
-		if (!data || type >= StructuredData::PlayerDataType::ENUM_MAX) return;
+		if (!data || type >= StructuredData::PlayerDataType::COUNT) return;
 
 		Game::StructuredDataEnum* dataEnum = &data->enums[type];
 
@@ -53,7 +54,7 @@ namespace Components
 				{
 					value = *i;
 					dataVector.erase(i);
-					Logger::Print("Playerdatadef entry '%s' will be rebased!\n", value);
+					Logger::Print("Playerdatadef entry '{}' will be rebased!\n", value);
 					break;
 				}
 			}
@@ -157,24 +158,13 @@ namespace Components
 			// 15 or more custom classes
 			Utils::Hook::Set<BYTE>(0x60A2FE, NUM_CUSTOM_CLASSES);
 
-			// Reset empty names
-			Command::Add("checkClasses", [](Command::Params*)
-			{
-				for (int i = 0; i < NUM_CUSTOM_CLASSES; ++i)
-				{
-					// TODO: Correctly lookup using structured data
-					char* className = (reinterpret_cast<char*>(0x1AD3694) - 4 + 3003 + (64 * i) + 0x29);
-					if (!*className) strcpy_s(className, 24, Game::SEH_StringEd_GetString(Utils::String::VA("CLASS_SLOT%i", i + 1)));
-				}
-			});
-
 			return;
 		}
 
 		AssetHandler::OnLoad([](Game::XAssetType type, Game::XAssetHeader asset, const std::string& filename, bool* /*restrict*/)
 		{
 			// Only intercept playerdatadef loading
-			if (type != Game::XAssetType::ASSET_TYPE_STRUCTURED_DATA_DEF || filename != "mp/playerdata.def") return;
+			if (type != Game::ASSET_TYPE_STRUCTURED_DATA_DEF || filename != "mp/playerdata.def") return;
 
 			// Store asset
 			Game::StructuredDataDefSet* data = asset.structuredDataDefSet;
@@ -182,44 +172,47 @@ namespace Components
 
 			if (data->defCount != 1)
 			{
-				Logger::Error("PlayerDataDefSet contains more than 1 definition!");
+				Logger::Error(Game::ERR_FATAL, "PlayerDataDefSet contains more than 1 definition!");
 				return;
 			}
 
 			if (data->defs[0].version != 155)
 			{
-				Logger::Error("Initial PlayerDataDef is not version 155, patching not possible!");
+				Logger::Error(Game::ERR_FATAL, "Initial PlayerDataDef is not version 155, patching not possible!");
 				return;
 			}
 
-			std::map<int, std::vector<std::vector<std::string>>> patchDefinitions;
-			std::map<int, std::unordered_map<std::string, std::string>> otherPatchDefinitions;
+			std::unordered_map<int, std::vector<std::vector<std::string>>> patchDefinitions;
+			std::unordered_map<int, std::unordered_map<std::string, std::string>> otherPatchDefinitions;
 
 			// First check if all versions are present
 			for (int i = 156;; ++i)
 			{
-				FileSystem::File definition(Utils::String::VA("%s/%d.json", filename.data(), i));
+				// We're on DB thread (OnLoad) so use DB thread for FS
+				FileSystem::File definition(std::format("{}/{}.json", filename, i), Game::FsThread::FS_THREAD_DATABASE);
 				if (!definition.exists()) break;
 
 				std::vector<std::vector<std::string>> enumContainer;
 				std::unordered_map<std::string, std::string> otherPatches;
 
-				std::string errors;
-				json11::Json defData = json11::Json::parse(definition.getBuffer(), errors);
-
-				if (!errors.empty())
+				nlohmann::json defData;
+				try
 				{
-					Logger::Error("Parsing patch file '%s' for PlayerDataDef version %d failed: %s", definition.getName().data(), i, errors.data());
+					defData = nlohmann::json::parse(definition.getBuffer());
+				}
+				catch (const nlohmann::json::parse_error& ex)
+				{
+					Logger::PrintError(Game::CON_CHANNEL_ERROR, "JSON Parse Error: {}\n", ex.what());
 					return;
 				}
 
 				if (!defData.is_object())
 				{
-					Logger::Error("PlayerDataDef patch for version %d is invalid!", i);
+					Logger::Error(Game::ERR_FATAL, "PlayerDataDef patch for version {} is invalid!", i);
 					return;
 				}
 
-				for (unsigned int pType = 0; pType < StructuredData::PlayerDataType::ENUM_MAX; ++pType)
+				for (auto pType = 0; pType < StructuredData::PlayerDataType::COUNT; ++pType)
 				{
 					auto enumData = defData[StructuredData::EnumTranslation[pType]];
 
@@ -227,11 +220,11 @@ namespace Components
 
 					if (enumData.is_array())
 					{
-						for (auto rawEntry : enumData.array_items())
+						for (const auto& rawEntry : enumData)
 						{
 							if (rawEntry.is_string())
 							{
-								entryData.push_back(rawEntry.string_value());
+								entryData.push_back(rawEntry.get<std::string>());
 							}
 						}
 					}
@@ -243,11 +236,11 @@ namespace Components
 
 				if (other.is_object())
 				{
-					for (auto& item : other.object_items())
+					for (auto& item : other.items())
 					{
-						if (item.second.is_string())
+						if (item.value().is_string())
 						{
-							otherPatches[item.first] = item.second.string_value();
+							otherPatches[item.key()] = item.value().get<std::string>();
 						}
 					}
 				}
@@ -260,7 +253,7 @@ namespace Components
 			if (patchDefinitions.empty()) return;
 
 			// Reallocate the definition
-			Game::StructuredDataDef* newData = StructuredData::MemAllocator.allocateArray<Game::StructuredDataDef>(data->defCount + patchDefinitions.size());
+			auto* newData = StructuredData::MemAllocator.allocateArray<Game::StructuredDataDef>(data->defCount + patchDefinitions.size());
 			std::memcpy(&newData[patchDefinitions.size()], data->defs, sizeof Game::StructuredDataDef * data->defCount);
 
 			// Prepare the buffers
@@ -270,7 +263,7 @@ namespace Components
 				newData[i].version = (patchDefinitions.size() - i) + 155;
 
 				// Reallocate the enum array
-				Game::StructuredDataEnum* newEnums = StructuredData::MemAllocator.allocateArray<Game::StructuredDataEnum>(data->defs->enumCount);
+				auto* newEnums = StructuredData::MemAllocator.allocateArray<Game::StructuredDataEnum>(data->defs->enumCount);
 				std::memcpy(newEnums, data->defs->enums, sizeof Game::StructuredDataEnum * data->defs->enumCount);
 				newData[i].enums = newEnums;
 			}
@@ -285,20 +278,20 @@ namespace Components
 				// No need to patch version 155
 				if (newData[i].version == 155) continue;
 
-				if (patchDefinitions.find(newData[i].version) != patchDefinitions.end())
+				if (patchDefinitions.contains(newData[i].version))
 				{
 					auto patchData = patchDefinitions[newData[i].version];
 					auto otherData = otherPatchDefinitions[newData[i].version];
 
 					// Invalid patch data
-					if (patchData.size() != StructuredData::PlayerDataType::ENUM_MAX)
+					if (patchData.size() != StructuredData::PlayerDataType::COUNT)
 					{
-						Logger::Error("PlayerDataDef patch for version %d wasn't parsed correctly!", newData[i].version);
+						Logger::Error(Game::ERR_FATAL, "PlayerDataDef patch for version {} wasn't parsed correctly!", newData[i].version);
 						continue;
 					}
 
 					// Apply the patch data
-					for (unsigned int pType = 0; pType < StructuredData::PlayerDataType::ENUM_MAX; ++pType)
+					for (auto pType = 0; pType < StructuredData::PlayerDataType::COUNT; ++pType)
 					{
 						if (!patchData[pType].empty())
 						{
@@ -310,10 +303,5 @@ namespace Components
 				}
 			}
 		});
-	}
-
-	StructuredData::~StructuredData()
-	{
-		StructuredData::MemAllocator.clear();
 	}
 }

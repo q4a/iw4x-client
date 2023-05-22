@@ -2,10 +2,6 @@
 	path = deps/zlib
 	url = https://github.com/madler/zlib.git
 	branch = develop
-[submodule "deps/json11"]
-	path = deps/json11
-	url = https://github.com/dropbox/json11.git
-	branch = master
 [submodule "deps/libtommath"]
 	path = deps/libtommath
 	url = https://github.com/libtom/libtommath.git
@@ -21,14 +17,30 @@
 [submodule "deps/mongoose"]
 	path = deps/mongoose
 	url = https://github.com/cesanta/mongoose.git
-	branch = dev
+	branch = 7.9
 [submodule "deps/protobuf"]
 	path = deps/protobuf
 	url = https://github.com/google/protobuf.git
-	branch = 3.11.x
+	branch = 3.20.x
 [submodule "deps/udis86"]
 	path = deps/udis86
 	url = https://github.com/vmt/udis86.git
 [submodule "deps/dxsdk"]
 	path = deps/dxsdk
 	url = https://github.com/devKlausS/dxsdk.git
+[submodule "deps/GSL"]
+	path = deps/GSL
+	url = https://github.com/microsoft/GSL.git
+[submodule "deps/nlohmannjson"]
+	path = deps/json
+	url = https://github.com/nlohmann/json.git
+	branch = v3.11.2
+[submodule "deps/discord-rpc"]
+	path = deps/discord-rpc
+	url = https://github.com/discord/discord-rpc.git
+[submodule "deps/rapidjson"]
+	path = deps/rapidjson
+	url = https://github.com/Tencent/rapidjson.git
+[submodule "deps/iw4-open-formats"]
+	path = deps/iw4-open-formats
+	url = https://github.com/XLabsProject/iw4-open-formats.git

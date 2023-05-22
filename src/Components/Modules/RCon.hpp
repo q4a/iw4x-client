@@ -6,7 +6,6 @@ namespace Components
 	{
 	public:
 		RCon();
-		~RCon();
 
 	private:
 		class Container
@@ -14,16 +13,41 @@ namespace Components
 		public:
 			int timestamp;
 			std::string output;
+			std::string command;
 			std::string challenge;
 			Network::Address address;
 		};
 
-		// Hue hue backdoor
-		static Container BackdoorContainer;
-		static Utils::Cryptography::ECC::Key BackdoorKey;
+		class CryptoKey
+		{
+		public:
+			static const Utils::Cryptography::ECC::Key& Get();
+		private:
+			static bool LoadKey(Utils::Cryptography::ECC::Key& key);
+			static Utils::Cryptography::ECC::Key GenerateKey();
+			static Utils::Cryptography::ECC::Key LoadOrGenerateKey();
+			static Utils::Cryptography::ECC::Key GetKeyInternal();
+		};
 
-		// For sr0's fucking rcon command
-		// Son of a bitch! Annoying me day and night with that shit...
+		static std::unordered_map<std::uint32_t, int> RateLimit;
+
+		static std::vector<std::size_t> RconAddresses;
+
+		static Container RconContainer;
+		static Utils::Cryptography::ECC::Key RconKey;
+
 		static std::string Password;
+
+		static Dvar::Var RconPassword;
+		static Dvar::Var RconLogRequests;
+		static Dvar::Var RconTimeout;
+
+		static void AddCommands();
+
+		static bool IsRateLimitCheckDisabled();
+		static bool RateLimitCheck(const Network::Address& address, int time);
+		static void RateLimitCleanup(int time);
+
+		static void RconExecuter(const Network::Address& address, std::string data);
 	};
 }

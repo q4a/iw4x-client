@@ -1,104 +1,129 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
 
 namespace Components
 {
-	std::unordered_map<std::string, Utils::Slot<Command::Callback>> Command::FunctionMap;
-	std::unordered_map<std::string, Utils::Slot<Command::Callback>> Command::FunctionMapSV;
+	std::unordered_map<std::string, Command::commandCallback> Command::FunctionMap;
+	std::unordered_map<std::string, Command::commandCallback> Command::FunctionMapSV;
 
-	std::string Command::Params::join(size_t startIndex)
+	std::string Command::Params::join(const int index) const
 	{
 		std::string result;
 
-		for (size_t i = startIndex; i < this->length(); ++i)
+		for (auto i = index; i < this->size(); i++)
 		{
-			if (i > startIndex) result.append(" ");
-			result.append(this->operator[](i));
+			if (i > index) result.append(" ");
+			result.append(this->get(i));
 		}
 
 		return result;
 	}
 
-	char* Command::Params::operator[](size_t index)
+	Command::ClientParams::ClientParams()
+		: nesting_(Game::cmd_args->nesting)
 	{
-		return this->get(index);
+		assert(Game::cmd_args->nesting < Game::CMD_MAX_NESTING);
 	}
 
-	char* Command::ClientParams::get(size_t index)
+	int Command::ClientParams::size() const noexcept
 	{
-		if (index >= this->length()) return const_cast<char*>("");
-		return Game::cmd_argv[this->commandId][index];
+		return Game::cmd_args->argc[this->nesting_];
 	}
 
-	size_t Command::ClientParams::length()
+	const char* Command::ClientParams::get(const int index) const noexcept
 	{
-		return Game::cmd_argc[this->commandId];
-	}
-
-	char* Command::ServerParams::get(size_t index)
-	{
-		if (index >= this->length()) return const_cast<char*>("");
-		return Game::cmd_argv_sv[this->commandId][index];
-	}
-
-	size_t Command::ServerParams::length()
-	{
-		return Game::cmd_argc_sv[this->commandId];
-	}
-
-	void Command::Add(const char* name, Utils::Slot<Command::Callback> callback)
-	{
-		std::string command = Utils::String::ToLower(name);
-
-		if (Command::FunctionMap.find(command) == Command::FunctionMap.end())
+		if (index >= this->size())
 		{
-			Command::AddRaw(name, Command::MainCallback);
+			return "";
 		}
 
-		Command::FunctionMap[command] = callback;
+		return Game::cmd_args->argv[this->nesting_][index];
 	}
 
-	void Command::AddSV(const char* name, Utils::Slot<Command::Callback> callback)
+	Command::ServerParams::ServerParams()
+		: nesting_(Game::sv_cmd_args->nesting)
+	{
+		assert(Game::sv_cmd_args->nesting < Game::CMD_MAX_NESTING);
+	}
+
+	int Command::ServerParams::size() const noexcept
+	{
+		return Game::sv_cmd_args->argc[this->nesting_];
+	}
+
+	const char* Command::ServerParams::get(const int index) const noexcept
+	{
+		if (index >= this->size())
+		{
+			return "";
+		}
+
+		return Game::sv_cmd_args->argv[this->nesting_][index];
+	}
+
+	void Command::Add(const char* name, const std::function<void()>& callback)
+	{
+		Add(name, [callback]([[maybe_unused]] const Params* params)
+		{
+			callback();
+		});
+	}
+
+	void Command::Add(const char* name, const commandCallback& callback)
+	{
+		const auto command = Utils::String::ToLower(name);
+
+		if (!FunctionMap.contains(command))
+		{
+			AddRaw(name, MainCallback);
+		}
+
+		FunctionMap.insert_or_assign(command, callback);
+	}
+
+	void Command::AddSV(const char* name, const commandCallback& callback)
 	{
 		if (Loader::IsPregame())
 		{
-			MessageBoxA(nullptr, "Registering server commands in pregamestate is illegal!", nullptr, MB_ICONERROR);
-
-#ifdef DEBUG
+			MessageBoxA(nullptr, "Registering server commands in pregame state is illegal!", nullptr, MB_ICONERROR);
+#ifdef _DEBUG
 			__debugbreak();
 #endif
-
 			return;
 		}
 
-		std::string command = Utils::String::ToLower(name);
+		const auto command = Utils::String::ToLower(name);
 
-		if (Command::FunctionMapSV.find(command) == Command::FunctionMapSV.end())
+		if (!FunctionMapSV.contains(command))
 		{
-			Command::AddRawSV(name, Command::MainCallbackSV);
-
-			// If the main command is registered as Cbuf_AddServerText, the command will be redirected to the SV handler
-			Command::AddRaw(name, Game::Cbuf_AddServerText);
+			AddRawSV(name, MainCallbackSV);
 		}
 
-		Command::FunctionMapSV[command] = callback;
+		FunctionMapSV.insert_or_assign(command, callback);
 	}
 
 	void Command::AddRaw(const char* name, void(*callback)(), bool key)
 	{
-		Game::Cmd_AddCommand(name, callback, Command::Allocate(), key);
+		Game::Cmd_AddCommand(name, callback, Allocate(), key);
 	}
 
 	void Command::AddRawSV(const char* name, void(*callback)())
 	{
-		Game::Cmd_AddServerCommand(name, callback, Command::Allocate());
+		Game::Cmd_AddServerCommand(name, callback, Allocate());
 
 		// If the main command is registered as Cbuf_AddServerText, the command will be redirected to the SV handler
-		Command::AddRaw(name, Game::Cbuf_AddServerText);
+		AddRaw(name, Game::Cbuf_AddServerText_f, false);
 	}
 
 	void Command::Execute(std::string command, bool sync)
 	{
-		command.append("\n"); // Make sure it's terminated
+		if (command.empty())
+		{
+			return;
+		}
+
+		command.push_back('\n'); // Make sure it's terminated
+
+		assert(command.size() < Game::MAX_CMD_LINE);
 
 		if (sync)
 		{
@@ -110,13 +135,13 @@ namespace Components
 		}
 	}
 
-	Game::cmd_function_t* Command::Find(const std::string& command)
+	Game::cmd_function_s* Command::Find(const std::string& command)
 	{
-		Game::cmd_function_t* cmdFunction = *Game::cmd_functions;
+		auto* cmdFunction = *Game::cmd_functions;
 
 		while (cmdFunction)
 		{
-			if (cmdFunction->name && cmdFunction->name == command)
+			if (cmdFunction->name && Utils::String::Compare(cmdFunction->name, command))
 			{
 				return cmdFunction;
 			}
@@ -127,148 +152,78 @@ namespace Components
 		return nullptr;
 	}
 
-	Game::cmd_function_t* Command::Allocate()
+	Game::cmd_function_s* Command::Allocate()
 	{
-		return Utils::Memory::GetAllocator()->allocate<Game::cmd_function_t>();
+		return Utils::Memory::GetAllocator()->allocate<Game::cmd_function_s>();
 	}
 
 	void Command::MainCallback()
 	{
-		Command::ClientParams params(*Game::cmd_id);
+		ClientParams params;
+		const auto command = Utils::String::ToLower(params[0]);
 
-		std::string command = Utils::String::ToLower(params[0]);
-
-		if (Command::FunctionMap.find(command) != Command::FunctionMap.end())
+		if (const auto itr = FunctionMap.find(command); itr != FunctionMap.end())
 		{
-			Command::FunctionMap[command](&params);
+			itr->second(&params);
 		}
 	}
 
 	void Command::MainCallbackSV()
 	{
-		Command::ServerParams params(*Game::cmd_id_sv);
+		ServerParams params;
+		const auto command = Utils::String::ToLower(params[0]);
 
-		std::string command = Utils::String::ToLower(params[0]);
-
-		if (Command::FunctionMapSV.find(command) != Command::FunctionMapSV.end())
+		if (const auto itr = FunctionMapSV.find(command); itr != FunctionMapSV.end())
 		{
-			Command::FunctionMapSV[command](&params);
+			itr->second(&params);
 		}
+	}
+
+	const std::vector<std::string>& Command::GetExceptions()
+	{
+		static const auto exceptions = []() -> std::vector<std::string>
+		{
+			std::vector<std::string> values =
+			{
+				"cmd",
+				"exec",
+				"map",
+			};
+
+			if (Flags::HasFlag("disable-notifies"))
+			{
+				values.emplace_back("vstr");
+				values.emplace_back("wait");
+			}
+
+			return values;
+		}();
+
+		return exceptions;
+	}
+
+	bool Command::CL_ShouldSendNotify_Hk(const char* cmd)
+	{
+		if (!cmd)
+		{
+			return false;
+		}
+
+		const auto& exceptions = GetExceptions();
+		for (const auto& entry : exceptions)
+		{
+			if (Utils::String::Compare(cmd, entry))
+			{
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	Command::Command()
 	{
-		AssertSize(Game::cmd_function_t, 24);
-
-		static int toastDurationShort = 1000;
-		static int toastDurationMedium = 2500;
-		static int toastDurationLong = 5000;
-
-		// Disable native noclip command
-		Utils::Hook::Nop(0x474846, 5);
-
-		Command::Add("noclip", [](Command::Params*)
-		{
-			int clientNum = Game::CG_GetClientNum();
-			if (!Game::CL_IsCgameInitialized() || clientNum >= 18 || clientNum < 0 || !Game::g_entities[clientNum].client)
-			{
-				Logger::Print("You are not hosting a match!\n");
-				Toast::Show("cardicon_stop", "Error", "You are not hosting a match!", toastDurationMedium);
-				return;
-			}
-
-			if (!Dvar::Var("sv_cheats").get<bool>())
-			{
-				Logger::Print("Cheats disabled!\n");
-				Toast::Show("cardicon_stop", "Error", "Cheats disabled!", toastDurationMedium);
-				return;
-			}
-
-			Game::g_entities[clientNum].client->flags ^= Game::PLAYER_FLAG_NOCLIP;
-
-			Logger::Print("Noclip toggled\n");
-			Toast::Show("cardicon_abduction", "Success", "Noclip toggled", toastDurationShort);
-		});
-
-		Command::Add("ufo", [](Command::Params*)
-		{
-			int clientNum = Game::CG_GetClientNum();
-			if (!Game::CL_IsCgameInitialized() || clientNum >= 18 || clientNum < 0 || !Game::g_entities[clientNum].client)
-			{
-				Logger::Print("You are not hosting a match!\n");
-				Toast::Show("cardicon_stop", "Error", "You are not hosting a match!", toastDurationMedium);
-				return;
-			}
-
-			if (!Dvar::Var("sv_cheats").get<bool>())
-			{
-				Logger::Print("Cheats disabled!\n");
-				Toast::Show("cardicon_stop", "Error", "Cheats disabled!", toastDurationMedium);
-				return;
-			}
-
-			Game::g_entities[clientNum].client->flags ^= Game::PLAYER_FLAG_UFO;
-
-			Logger::Print("UFO toggled\n");
-			Toast::Show("cardicon_abduction", "Success", "UFO toggled", toastDurationShort);
-		});
-
-		Command::Add("setviewpos", [](Command::Params* params)
-		{
-			int clientNum = Game::CG_GetClientNum();
-			if (!Game::CL_IsCgameInitialized() || clientNum >= 18 || clientNum < 0 || !Game::g_entities[clientNum].client)
-			{
-				Logger::Print("You are not hosting a match!\n");
-				Toast::Show("cardicon_stop", "Error", "You are not hosting a match!", toastDurationMedium);
-				return;
-			}
-
-			if (!Dvar::Var("sv_cheats").get<bool>())
-			{
-				Logger::Print("Cheats disabled!\n");
-				Toast::Show("cardicon_stop", "Error", "Cheats disabled!", toastDurationMedium);
-				return;
-			}
-
-			if (params->length() != 4 && params->length() != 6)
-			{
-				Logger::Print("Invalid coordinate specified!\n");
-				Toast::Show("cardicon_stop", "Error", "Invalid coordinate specified!", toastDurationMedium);
-				return;
-			}
-
-			float pos[3] = { 0.0f, 0.0f, 0.0f };
-			float orientation[3] = { 0.0f, 0.0f, 0.0f };
-
-			pos[0] = strtof(params->get(1), nullptr);
-			pos[1] = strtof(params->get(2), nullptr);
-			pos[2] = strtof(params->get(3), nullptr);
-
-			if (params->length() == 6)
-			{
-				orientation[0] = strtof(params->get(4), nullptr);
-				orientation[1] = strtof(params->get(5), nullptr);
-			}
-
-			Game::TeleportPlayer(&Game::g_entities[clientNum], pos, orientation);
-
-			//Logging that will spam the console and screen if people use cinematics
-			//Logger::Print("Successfully teleported player!\n");
-			//Toast::Show("cardicon_abduction", "Success", "You have been teleported!", toastDurationShort);
-		});
-
-		Command::Add("openLink", [](Command::Params* params)
-		{
-			if (params->length() > 1)
-			{
-				Utils::OpenUrl(params->get(1));
-			}
-		});
-	}
-
-	Command::~Command()
-	{
-		Command::FunctionMap.clear();
-		Command::FunctionMapSV.clear();
+		// Protect players from invasive servers
+		Utils::Hook(0x434BD4, CL_ShouldSendNotify_Hk, HOOK_CALL).install()->quick();  // CL_CheckNotify
 	}
 }

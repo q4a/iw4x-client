@@ -1,4 +1,4 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
 
 namespace Utils
 {
@@ -10,7 +10,7 @@ namespace Utils
 		if (mimeType)
 		{
 			std::wstring wMimeType(mimeType);
-			return std::string(wMimeType.begin(), wMimeType.end());
+			return String::Convert(wMimeType);
 		}
 
 		return "application/octet-stream";
@@ -18,9 +18,9 @@ namespace Utils
 
 	std::string ParseChallenge(const std::string& data)
 	{
-		auto pos = data.find_first_of("\n ");
+		const auto pos = data.find_first_of("\n ");
 		if (pos == std::string::npos) return data;
-		return data.substr(0, pos).data();
+		return data.substr(0, pos);
 	}
 
 	void OutputDebugLastError()
@@ -53,7 +53,7 @@ namespace Utils
 		HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 		if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
-		Utils::Memory::Allocator allocator;
+		Memory::Allocator allocator;
 		allocator.reference(hSnapshot, [](void* handle) { CloseHandle(handle); });
 
 		PROCESSENTRY32 pe32;
@@ -72,7 +72,7 @@ namespace Utils
 		return 0;
 	}
 
-	size_t GetModuleSize(HMODULE module)
+	std::size_t GetModuleSize(HMODULE module)
 	{
 		PIMAGE_DOS_HEADER header = PIMAGE_DOS_HEADER(module);
 		PIMAGE_NT_HEADERS ntHeader = PIMAGE_NT_HEADERS(DWORD(module) + header->e_lfanew);
@@ -81,12 +81,12 @@ namespace Utils
 
 	void* GetThreadStartAddress(HANDLE hThread)
 	{
-		HMODULE ntdll = Utils::GetNTDLL();
+		HMODULE ntdll = GetNTDLL();
 		if (!ntdll) return nullptr;
 
 
 		static uint8_t ntQueryInformationThread[] = { 0xB1, 0x8B, 0xAE, 0x8A, 0x9A, 0x8D, 0x86, 0xB6, 0x91, 0x99, 0x90, 0x8D, 0x92, 0x9E, 0x8B, 0x96, 0x90, 0x91, 0xAB, 0x97, 0x8D, 0x9A, 0x9E, 0x9B }; // NtQueryInformationThread
-		NtQueryInformationThread_t NtQueryInformationThread = NtQueryInformationThread_t(GetProcAddress(ntdll, Utils::String::XOR(std::string(reinterpret_cast<char*>(ntQueryInformationThread), sizeof ntQueryInformationThread), -1).data()));
+		NtQueryInformationThread_t NtQueryInformationThread = NtQueryInformationThread_t(GetProcAddress(ntdll, String::XOR(std::string(reinterpret_cast<char*>(ntQueryInformationThread), sizeof ntQueryInformationThread), -1).data()));
 		if (!NtQueryInformationThread) return nullptr;
 
 		HANDLE dupHandle, currentProcess = GetCurrentProcess();
@@ -104,15 +104,32 @@ namespace Utils
 		return address;
 	}
 
-	void SetEnvironment()
+	void SetLegacyEnvironment()
 	{
-		wchar_t exeName[512];
-		GetModuleFileName(GetModuleHandle(nullptr), exeName, sizeof(exeName) / 2);
+		wchar_t binaryPath[512]{};
+		GetModuleFileNameW(GetModuleHandleW(nullptr), binaryPath, sizeof(binaryPath) / sizeof(wchar_t));
 
-		wchar_t* exeBaseName = wcsrchr(exeName, L'\\');
+		auto* exeBaseName = std::wcsrchr(binaryPath, L'\\');
 		exeBaseName[0] = L'\0';
 
-		SetCurrentDirectory(exeName);
+		// Make the game work without the xlabs launcher
+		SetCurrentDirectoryW(binaryPath);
+	}
+
+	void SetEnvironment()
+	{
+		wchar_t* buffer{};
+		std::size_t size{};
+		if (_wdupenv_s(&buffer, &size, L"XLABS_MW2_INSTALL") != 0 || buffer == nullptr)
+		{
+			SetLegacyEnvironment();
+			return;
+		}
+
+		const auto _0 = gsl::finally([&] { std::free(buffer); });
+
+		SetCurrentDirectoryW(buffer);
+		SetDllDirectoryW(buffer);
 	}
 
 	HMODULE GetNTDLL()
@@ -123,11 +140,7 @@ namespace Utils
 
 	void SafeShellExecute(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile, LPCSTR lpParameters, LPCSTR lpDirectory, INT nShowCmd)
 	{
-#ifndef DISABLE_ANTICHEAT
-		Components::AntiCheat::LibUnlocker _;
-#endif
-
-		[=]()
+		[=]
 		{
 			__try
 			{
@@ -145,7 +158,7 @@ namespace Utils
 		SafeShellExecute(nullptr, "open", url.data(), nullptr, nullptr, SW_SHOWNORMAL);
 	}
 
-	bool HasIntercection(unsigned int base1, unsigned int len1, unsigned int base2, unsigned int len2)
+	bool HasIntersection(unsigned int base1, unsigned int len1, unsigned int base2, unsigned int len2)
 	{
 		return !(base1 + len1 <= base2 || base2 + len2 <= base1);
 	}

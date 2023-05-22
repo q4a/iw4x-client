@@ -1,18 +1,21 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "Weapon.hpp"
+
+#include "GSC/Script.hpp"
 
 namespace Components
 {
-	Game::XAssetHeader Weapon::WeaponFileLoad(Game::XAssetType /*type*/, const std::string& filename)
-	{
-		Game::XAssetHeader header = { nullptr };
+	const Game::dvar_t* Weapon::BGWeaponOffHandFix;
 
-		// Try loading raw weapon
-		if (FileSystem::File(Utils::String::VA("weapons/mp/%s", filename.data())).exists())
+	Game::WeaponCompleteDef* Weapon::LoadWeaponCompleteDef(const char* name)
+	{
+		if (auto* rawWeaponFile = Game::BG_LoadWeaponCompleteDefInternal("mp", name))
 		{
-			header.data = Game::BG_LoadWeaponDef_LoadObj(filename.data());
+			return rawWeaponFile;
 		}
 
-		return header;
+		auto* zoneWeaponFile = Game::DB_FindXAssetHeader(Game::ASSET_TYPE_WEAPON, name).weapon;
+		return Game::DB_IsXAssetDefault(Game::ASSET_TYPE_WEAPON, name) ? nullptr : zoneWeaponFile;
 	}
 
 	const char* Weapon::GetWeaponConfigString(int index)
@@ -37,8 +40,20 @@ namespace Components
 	int Weapon::ParseWeaponConfigStrings()
 	{
 		Command::ClientParams params;
-		if (params.length() <= 1) return 0;
-		int index = atoi(params[1]);
+
+		if (params.size() <= 1)
+			return 0;
+
+		char* end;
+		const auto* input = params.get(1);
+		auto index = std::strtol(input, &end, 10);
+
+		if (input == end)
+		{
+			Logger::Warning(Game::CON_CHANNEL_DONT_FILTER, "{} is not a valid input\nUsage: {} <weapon index>\n",
+				input, params.get(0));
+			return 0;
+		}
 
 		if (index >= 4139)
 		{
@@ -53,7 +68,7 @@ namespace Components
 			return 0;
 		}
 
-		Utils::Hook::Call<void(int, int)>(0x4BD520)(0, index);
+		Game::CG_SetupWeaponDef(0, index);
 		return 1;
 	}
 
@@ -436,13 +451,185 @@ namespace Components
 		}
 	}
 
+	void __declspec(naked) Weapon::CG_UpdatePrimaryForAltModeWeapon_Stub()
+	{
+		__asm
+		{
+			mov eax, 0x440EB0 // BG_GetWeaponDef
+			call eax
+			add esp, 0x4
+
+			test eax, eax
+			jz null
+
+			// Game code
+			push 0x59E349
+			retn
+
+		null:
+			mov al, 1
+			ret
+		}
+	}
+
+	void __declspec(naked) Weapon::CG_SelectWeaponIndex_Stub()
+	{
+		__asm
+		{
+			mov eax, 0x440EB0 // BG_GetWeaponDef
+			call eax
+			add esp, 0x4
+
+			test eax, eax
+			jz null
+
+			// Game code
+			push 0x48BB2D
+			ret
+
+		null:
+			push 0x48BB1F // Exit function
+			ret
+		}
+	}
+
+	void __declspec(naked) Weapon::WeaponEntCanBeGrabbed_Stub()
+	{
+		using namespace Game;
+
+		__asm
+		{
+			cmp dword ptr [esp + 0x8], 0x0
+			jz touched
+
+			push 0x56E82C
+			ret
+
+		touched:
+			test dword ptr [edi + 0x2BC], PWF_DISABLE_WEAPON_PICKUP
+			jnz exit_func
+
+			// Game code
+			test eax, eax
+			jz continue_func
+
+		exit_func:
+			xor eax, eax
+			ret
+
+		continue_func:
+			push 0x56E84C
+			ret
+		}
+	}
+
+	__declspec(naked) void Weapon::JavelinResetHook_Stub()
+	{
+		static DWORD PM_Weapon_OffHandEnd_t = 0x577A10;
+
+		__asm
+		{
+			call PM_Weapon_OffHandEnd_t
+
+			push eax
+			mov eax, BGWeaponOffHandFix
+			cmp byte ptr [eax + 0x10], 1
+			pop eax
+
+			jne safeReturn
+
+			mov dword ptr [esi + 0x34], 0 // playerState_s.grenadeTimeLeft
+
+		safeReturn:
+			pop edi
+			pop esi
+			pop ebx
+			ret
+		}
+	}
+
+	void Weapon::PlayerCmd_InitialWeaponRaise(const Game::scr_entref_t entref)
+	{
+		auto* ent = GSC::Script::Scr_GetPlayerEntity(entref);
+		const auto* weapon = Game::Scr_GetString(0);
+		const auto index = Game::G_GetWeaponIndexForName(weapon);
+
+		auto* ps = &ent->client->ps;
+		if (!Game::BG_IsWeaponValid(ps, index))
+		{
+			Game::Scr_Error(Utils::String::VA("invalid InitialWeaponRaise: %s", weapon));
+			return;
+		}
+
+		assert(ps);
+
+		if (!index)
+		{
+			return;
+		}
+
+		auto* equippedWeapon = Game::BG_GetEquippedWeaponState(ps, index);
+		if (!equippedWeapon)
+		{
+			return;
+		}
+
+		equippedWeapon->usedBefore = false;
+		Game::Player_SwitchToWeapon(ent);
+	}
+
+	void Weapon::PlayerCmd_FreezeControlsAllowLook(const Game::scr_entref_t entref)
+	{
+		const auto* ent = GSC::Script::Scr_GetPlayerEntity(entref);
+
+		if (Game::Scr_GetInt(0))
+		{
+			ent->client->ps.weapCommon.weapFlags |= Game::PWF_DISABLE_WEAPONS;
+			ent->client->flags |= Game::CF_BIT_DISABLE_USABILITY;
+		}
+		else
+		{
+			ent->client->ps.weapCommon.weapFlags &= ~Game::PWF_DISABLE_WEAPONS;
+			ent->client->flags &= ~Game::CF_BIT_DISABLE_USABILITY;
+		}
+	}
+
+	void Weapon::AddScriptMethods()
+	{
+		GSC::Script::AddMethod("DisableWeaponPickup", [](const Game::scr_entref_t entref)
+		{
+			const auto* ent = GSC::Script::Scr_GetPlayerEntity(entref);
+
+			ent->client->ps.weapCommon.weapFlags |= Game::PWF_DISABLE_WEAPON_PICKUP;
+		});
+
+		GSC::Script::AddMethod("EnableWeaponPickup", [](const Game::scr_entref_t entref)
+		{
+			const auto* ent = GSC::Script::Scr_GetPlayerEntity(entref);
+
+			ent->client->ps.weapCommon.weapFlags &= ~Game::PWF_DISABLE_WEAPON_PICKUP;
+		});
+
+		// PlayerCmd_AreControlsFrozen GSC function from Black Ops 2
+		GSC::Script::AddMethod("AreControlsFrozen", [](Game::scr_entref_t entref) // Usage: self AreControlsFrozen();
+		{
+			const auto* ent = GSC::Script::Scr_GetPlayerEntity(entref);
+			Game::Scr_AddBool((ent->client->flags & Game::CF_BIT_FROZEN) != 0);
+		});
+
+		GSC::Script::AddMethod("InitialWeaponRaise", PlayerCmd_InitialWeaponRaise);
+		GSC::Script::AddMethod("FreezeControlsAllowLook", PlayerCmd_FreezeControlsAllowLook);
+	}
+
 	Weapon::Weapon()
 	{
-		Weapon::PatchLimit();
-		Weapon::PatchConfigStrings();
+		PatchLimit();
+		PatchConfigStrings();
 
-		// Intercept weapon loading
-		AssetHandler::OnFind(Game::XAssetType::ASSET_TYPE_WEAPON, Weapon::WeaponFileLoad);
+		// BG_LoadWEaponCompleteDef_FastFile
+		Utils::Hook(0x57B650, LoadWeaponCompleteDef, HOOK_JUMP).install()->quick();
+		// Disable warning if raw weapon file cannot be found
+		Utils::Hook::Nop(0x57AF60, 5);
 
 		// weapon asset existence check
 		Utils::Hook::Nop(0x408228, 5); // find asset header
@@ -454,16 +641,23 @@ namespace Components
 
 		// Weapon swap fix
 		Utils::Hook::Nop(0x4B3670, 5);
-		Utils::Hook(0x57B4F0, LoadNoneWeaponHookStub).install()->quick();
-
-		// Don't load bounce sounds for now, it causes crashes
-		// TODO: Actually check the weaponfiles and/or reset the soundtable correctly!
-		//Utils::Hook::Nop(0x57A360, 5);
-		//Utils::Hook::Nop(0x57A366, 6);
-		Utils::Hook::Nop(0x5795E9, 2);
+		Utils::Hook(0x57B4F0, LoadNoneWeaponHookStub, HOOK_JUMP).install()->quick();
 
 		// Clear weapons independently from fs_game
-		//Utils::Hook::Nop(0x452C1D, 2);
-		//Utils::Hook::Nop(0x452C24, 5);
+		Utils::Hook::Nop(0x452C1D, 2);
+		Utils::Hook::Nop(0x452C24, 5);
+
+		Utils::Hook(0x59E341, CG_UpdatePrimaryForAltModeWeapon_Stub, HOOK_JUMP).install()->quick();
+		Utils::Hook(0x48BB25, CG_SelectWeaponIndex_Stub, HOOK_JUMP).install()->quick();
+
+		AssertOffset(Game::playerState_s, Game::playerState_s::weapCommon.weapFlags, 0x2BC);
+		Utils::Hook(0x56E825, WeaponEntCanBeGrabbed_Stub, HOOK_JUMP).install()->quick();
+
+		// Javelin fix (PM_Weapon_OffHandEnd)
+		AssertOffset(Game::playerState_s, grenadeTimeLeft, 0x34);
+		BGWeaponOffHandFix = Game::Dvar_RegisterBool("bg_weaponOffHandFix", true, Game::DVAR_CODINFO, "Reset grenadeTimeLeft after using off hand weapon");
+		Utils::Hook(0x578F52, JavelinResetHook_Stub, HOOK_JUMP).install()->quick();
+
+		AddScriptMethods();
 	}
 }

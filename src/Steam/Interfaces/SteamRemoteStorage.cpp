@@ -1,4 +1,4 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
 
 STEAM_IGNORE_WARNINGS_START
 
@@ -16,7 +16,9 @@ namespace Steam
 
 	int RemoteStorage::FileRead(const char *pchFile, void *pvData, int cubDataToRead)
 	{
+#ifdef _DEBUG
 		OutputDebugStringA(pchFile);
+#endif
 		return 0;
 	}
 

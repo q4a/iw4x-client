@@ -6,15 +6,17 @@ namespace Components
 	{
 	public:
 		Stats();
-		~Stats();
 
 		static bool IsMaxLevel();
 
 	private:
-		static void UpdateClasses(UIScript::Token token);
-		static void SendStats();
-		static int SaveStats(char* dest, const char* folder, const char* buffer, size_t length);
+		static void UpdateClasses([[maybe_unused]] const UIScript::Token& token, [[maybe_unused]] const Game::uiInfo_s* info);
 
-		static int64_t* GetStatsID();
+		static void SendStats();
+		static int SaveStats(char* dest, const char* folder, const char* buffer, int size);
+
+		static std::int64_t* GetStatsID();
+
+		static void AddScriptFunctions();
 	};
 }

@@ -1,4 +1,5 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "Components/Modules/StartupMessages.hpp"
 
 namespace Steam
 {
@@ -54,7 +55,7 @@ namespace Steam
 
 		for (auto result : results)
 		{
-			if (Callbacks::ResultHandlers.find(result.call) != Callbacks::ResultHandlers.end())
+			if (Callbacks::ResultHandlers.contains(result.call))
 			{
 				Callbacks::ResultHandlers[result.call]->Run(result.data, false, result.call);
 			}
@@ -104,7 +105,14 @@ namespace Steam
 
 	bool Enabled()
 	{
-		return !Components::Flags::HasFlag("nosteam");
+		static std::optional<bool> flag;
+
+		if (!flag.has_value())
+		{
+			flag = Components::Flags::HasFlag("nosteam");
+		}
+
+		return !flag.value();
 	}
 
 	extern "C"
@@ -115,7 +123,9 @@ namespace Steam
 
 			if (!Proxy::Inititalize())
 			{
+#ifdef _DEBUG
 				OutputDebugStringA("Steam proxy not initialized properly");
+#endif
 				Components::StartupMessages::AddMessage("Warning:\nUnable to connect to Steam. Steam features will be unavailable");
 			}
 			else

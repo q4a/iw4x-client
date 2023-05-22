@@ -1,41 +1,36 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
 
 namespace Components
 {
-	std::unordered_map<std::string, Utils::Slot<UIScript::Callback>> UIScript::UIScripts;
-	std::unordered_map<int, Utils::Slot<UIScript::CallbackRaw>> UIScript::UIOwnerDraws;
+	std::unordered_map<std::string, UIScript::UIScriptHandler> UIScript::UIScripts;
+	std::unordered_map<int, std::function<void()>> UIScript::UIOwnerDraws;
 
-	template<> int UIScript::Token::get()
+	template<> int UIScript::Token::get() const
 	{
 		if (this->isValid())
 		{
-			return atoi(this->token);
+			return std::strtol(this->token, nullptr, 0);
 		}
 
 		return 0;
 	}
 
-	template<> char* UIScript::Token::get()
+	template<> const char* UIScript::Token::get() const
 	{
 		if (this->isValid())
 		{
 			return this->token;
 		}
 
-		return const_cast<char*>("");
+		return "";
 	}
 
-	template<> const char* UIScript::Token::get()
+	template<> std::string UIScript::Token::get() const
 	{
-		return this->get<char*>();
+		return {this->get<const char*>()};
 	}
 
-	template<> std::string UIScript::Token::get()
-	{
-		return this->get<const char*>();
-	}
-
-	bool UIScript::Token::isValid()
+	bool UIScript::Token::isValid() const
 	{
 		return (this->token && this->token[0]);
 	}
@@ -48,21 +43,28 @@ namespace Components
 		}
 	}
 
-	void UIScript::Add(const std::string& name, Utils::Slot<UIScript::Callback> callback)
+	Game::uiInfo_s* UIScript::UI_GetClientInfo(int localClientNum)
 	{
-		UIScript::UIScripts[name] = callback;
+		AssertIn(localClientNum, Game::STATIC_MAX_LOCAL_CLIENTS);
+		return &Game::uiInfoArray[localClientNum];
 	}
 
-	void UIScript::AddOwnerDraw(int ownerdraw, Utils::Slot<UIScript::CallbackRaw> callback)
+	void UIScript::Add(const std::string& name, const UIScriptHandler& callback)
 	{
-		UIScript::UIOwnerDraws[ownerdraw] = callback;
+		UIScripts[name] = callback;
+	}
+
+	void UIScript::AddOwnerDraw(int ownerdraw, const std::function<void()>& callback)
+	{
+		UIOwnerDraws[ownerdraw] = callback;
 	}
 
 	bool UIScript::RunMenuScript(const char* name, const char** args)
 	{
-		if (UIScript::UIScripts.find(name) != UIScript::UIScripts.end())
+		if (const auto itr = UIScripts.find(name); itr != UIScripts.end())
 		{
-			UIScript::UIScripts[name](UIScript::Token(args));
+			const auto* info = UI_GetClientInfo(0);
+			itr->second(Token(args), info);
 			return true;
 		}
 
@@ -71,9 +73,9 @@ namespace Components
 
 	void UIScript::OwnerDrawHandleKeyStub(int ownerDraw, int flags, float *special, int key)
 	{
-		if (key == 200 || key == 201) //mouse buttons
+		if (key == 200 || key == 201) // mouse buttons
 		{
-			for (auto i = UIScript::UIOwnerDraws.begin(); i != UIScript::UIOwnerDraws.end(); ++i)
+			for (auto i = UIOwnerDraws.begin(); i != UIOwnerDraws.end(); ++i)
 			{
 				if (i->first == ownerDraw)
 				{
@@ -91,12 +93,12 @@ namespace Components
 		{
 			mov eax, esp
 			add eax, 8h
-			mov edx, eax           // UIScript name
+			mov edx, eax // UIScript name
 			mov eax, [esp + 0C10h] // UIScript args
 
 			push eax
 			push edx
-			call UIScript::RunMenuScript
+			call RunMenuScript
 			add esp, 8h
 
 			test al, al
@@ -116,18 +118,20 @@ namespace Components
 
 	UIScript::UIScript()
 	{
+		AssertSize(Game::uiInfo_s, 0x22FC);
+
 		if (Dedicated::IsEnabled()) return;
 
 		// Install handler
-		Utils::Hook::RedirectJump(0x45EC59, UIScript::RunMenuScriptStub);
+		Utils::Hook::RedirectJump(0x45EC59, RunMenuScriptStub);
 
 		// Install ownerdraw handler
-		Utils::Hook(0x63D233, UIScript::OwnerDrawHandleKeyStub, HOOK_CALL).install()->quick();
+		Utils::Hook(0x63D233, OwnerDrawHandleKeyStub, HOOK_CALL).install()->quick();
 	}
 
 	UIScript::~UIScript()
 	{
-		UIScript::UIScripts.clear();
-		UIScript::UIOwnerDraws.clear();
+		UIScripts.clear();
+		UIOwnerDraws.clear();
 	}
 }

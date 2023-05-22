@@ -5,66 +5,77 @@ namespace Components
 	class Command : public Component
 	{
 	public:
+		static_assert(sizeof(Game::cmd_function_s) == 0x18);
+
 		class Params
 		{
 		public:
-			Params() {};
-			virtual ~Params() {};
-			virtual char* get(size_t index) = 0;
-			virtual size_t length() = 0;
+			Params() = default;
+			virtual ~Params() = default;
 
-			virtual std::string join(size_t startIndex);
-			virtual char* operator[](size_t index);
+			Params(Params&&) = delete;
+			Params(const Params&) = delete;
+			Params& operator=(Params&&) = delete;
+			Params& operator=(const Params&) = delete;
+
+			[[nodiscard]] virtual int size() const noexcept = 0;
+			[[nodiscard]] virtual const char* get(int index) const noexcept = 0;
+			[[nodiscard]] virtual std::string join(int index) const;
+
+			virtual const char* operator[](const int index)
+			{
+				return this->get(index);
+			}
 		};
 
-		class ClientParams : public Params
+		class ClientParams final : public Params
 		{
 		public:
-			ClientParams(unsigned int id) : commandId(id) {};
-			ClientParams(const ClientParams &obj) : commandId(obj.commandId) {};
-			ClientParams() : ClientParams(*Game::cmd_id) {};
+			ClientParams();
 
-			char* get(size_t index) override;
-			size_t length() override;
+			[[nodiscard]] int size() const noexcept override;
+			[[nodiscard]] const char* get(int index) const noexcept override;
 
 		private:
-			unsigned int commandId;
+			int nesting_;
 		};
 
-		class ServerParams : public Params
+		class ServerParams final : public Params
 		{
 		public:
-			ServerParams(unsigned int id) : commandId(id) {};
-			ServerParams(const ServerParams &obj) : commandId(obj.commandId) {};
-			ServerParams() : ServerParams(*Game::cmd_id_sv) {};
+			ServerParams();
 
-			char* get(size_t index) override;
-			size_t length() override;
+			[[nodiscard]] int size() const noexcept override;
+			[[nodiscard]] const char* get(int index) const noexcept override;
 
 		private:
-			unsigned int commandId;
+			int nesting_;
 		};
-
-		typedef void(Callback)(Command::Params* params);
 
 		Command();
-		~Command();
 
-		static Game::cmd_function_t* Allocate();
+		using commandCallback = std::function<void(const Params*)>;
 
-		static void Add(const char* name, Utils::Slot<Callback> callback);
-		static void AddSV(const char* name, Utils::Slot<Callback> callback);
+		static void Add(const char* name, const std::function<void()>& callback);
+		static void Add(const char* name, const commandCallback& callback);
 		static void AddRaw(const char* name, void(*callback)(), bool key = false);
-		static void AddRawSV(const char* name, void(*callback)());
+		static void AddSV(const char* name, const commandCallback& callback);
 		static void Execute(std::string command, bool sync = true);
 
-		static Game::cmd_function_t* Find(const std::string& command);
+		static Game::cmd_function_s* Find(const std::string& command);
 
 	private:
-		static std::unordered_map<std::string, Utils::Slot<Callback>> FunctionMap;
-		static std::unordered_map<std::string, Utils::Slot<Callback>> FunctionMapSV;
+		static std::unordered_map<std::string, commandCallback> FunctionMap;
+		static std::unordered_map<std::string, commandCallback> FunctionMapSV;
+
+		static Game::cmd_function_s* Allocate();
+
+		static void AddRawSV(const char* name, void(*callback)());
 
 		static void MainCallback();
 		static void MainCallbackSV();
+
+		static const std::vector<std::string>& GetExceptions();
+		static bool CL_ShouldSendNotify_Hk(const char* cmd);
 	};
 }

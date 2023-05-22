@@ -18,21 +18,19 @@ namespace Components
 		};
 		
 		Zones();
-		~Zones();
 
 		static void SetVersion(int version);
 
-		static int Version() { return Zones::ZoneVersion; };
-
-		static int GetEntitiesZoneVersion() { return Zones::EntitiesVersion; };
+		static int Version() { return ZoneVersion; }
 
 	private:
-	
 		static int ZoneVersion;
-		static int EntitiesVersion;
 		
 		static int FxEffectIndex;
 		static char* FxEffectStrings[64];
+
+		static std::unordered_map<int, FileData> fileDataMap;
+		static std::mutex fileDataMutex;
 
 		static bool CheckGameMapSp(int type);
 		static void GameMapSpPatchStub();
@@ -86,8 +84,6 @@ namespace Components
 		static void Load_ClipInfo(bool atStreamStart);
 		static int LoadClipMap(bool atStreamStart);
 		static uint32_t HashCRC32StringInt(const std::string& Value, uint32_t Initial);
-		static std::unordered_map<int, Zones::FileData> fileDataMap;
-		static std::mutex fileDataMutex;
 		static int FS_FOpenFileReadForThreadOriginal(const char*, int*, int);
 		static int FS_FOpenFileReadForThreadHook(const char* file, int* filePointer, int thread);
 		static int FS_ReadOriginal(void*, size_t, int);
@@ -106,6 +102,5 @@ namespace Components
 		static void LoadTracerDefFxEffect();
 		static void FixImageCategory(Game::GfxImage* image);
 		static char* ParseShellShock_Stub(const char** data_p);
-		static char* ParseVision_Stub(const char** data_p);
 	};
 }

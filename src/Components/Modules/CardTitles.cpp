@@ -1,44 +1,46 @@
-#include "STDInclude.hpp"
+#include <STDInclude.hpp>
+#include "CardTitles.hpp"
+#include "Events.hpp"
+#include "ServerCommands.hpp"
 
 namespace Components
 {
-	std::string CardTitles::CustomTitles[18];
-	Dvar::Var CardTitles::CustomTitleDvar;
+	char CardTitles::CustomTitles[Game::MAX_CLIENTS][18];
+	Dvar::Var CardTitles::CustomTitle;
 
 	CClient* CardTitles::GetClientByIndex(std::uint32_t index)
 	{
 		return &reinterpret_cast<CClient*>(0x8E77B0)[index];
 	}
 
-	std::int32_t CardTitles::GetPlayerCardClientInfo(std::int32_t lookupResult, playercarddata_s* data)
+	int CardTitles::GetPlayerCardClientInfo(int lookupResult, Game::PlayerCardData* data)
 	{
-		std::int32_t returnResult = lookupResult;
+		auto result = lookupResult;
 
-		std::string username = Dvar::Var("name").get<std::string>();
-
-		if (data->name == username)
+		const auto* username = Dvar::Name.get<const char*>();
+		if (std::strcmp(data->name, username) == 0)
 		{
-			returnResult += 0xFE000000;
+			result += 0xFE000000;
 		}
 		else
 		{
-			for (auto clientNum = 0; clientNum < 18; clientNum++)
+			for (std::size_t i = 0; i < Game::MAX_CLIENTS; ++i)
 			{
-				CClient* c = GetClientByIndex(clientNum);
+				CClient* c = GetClientByIndex(i);
 				if (c != nullptr)
 				{
-					if (!strcmp(data->name, c->Name))
+					if (!std::strcmp(data->name, c->Name))
 					{
 						// Since a 4 byte integer is overkill for a row num: We can use it to store the customprefix + clientNum and use a 2 byte integer for the row number
-						returnResult += 0xFF000000;
-						returnResult += clientNum * 0x10000;
+						result += 0xFF000000;
+						result += i * 0x10000;
 						break;
 					}
 				}
 			}
 		}
 
-		return returnResult;
+		return result;
 	}
 
 	void __declspec(naked) CardTitles::GetPlayerCardClientInfoStub()
@@ -62,7 +64,6 @@ namespace Components
 			mov [ebx + 4], eax
 			pop ebx
 
-			push 62EB2Ch
 			retn
 		}
 	}
@@ -72,7 +73,7 @@ namespace Components
 		std::uint8_t prefix = (request->tableRow >> (8 * 3)) & 0xFF;
 		std::uint8_t data = (request->tableRow >> (8 * 2)) & 0xFF;
 
-		if (data >= ARRAYSIZE(CardTitles::CustomTitles)) return nullptr;
+		if (data >= Game::MAX_CLIENTS) return nullptr;
 
 		if (request->tablename == "mp/cardTitleTable.csv"s)
 		{
@@ -83,10 +84,10 @@ namespace Components
 				{
 					if (prefix == 0xFE)
 					{
-						if (!CardTitles::CustomTitleDvar.get<std::string>().empty())
+						if (!CustomTitle.get<std::string>().empty())
 						{
 							// 0xFF in front of the title to skip localization. Or else it will wait for a couple of seconds for the asset of type localize
-							const char* title = Utils::String::VA("\x15%s", CardTitles::CustomTitleDvar.get<const char*>());
+							const auto* title = Utils::String::VA("\x15%s", CustomTitle.get<const char*>());
 
 							// prepare return value
 							operand->internals.stringVal.string = title;
@@ -97,9 +98,9 @@ namespace Components
 					}
 					else if (prefix == 0xFF)
 					{
-						if (!CardTitles::CustomTitles[data].empty())
+						if (CustomTitles[data][0] != '\0')
 						{
-							const char* title = Utils::String::VA("\x15%s", CardTitles::CustomTitles[data].data());
+							const auto* title = Utils::String::VA("\x15%s", CustomTitles[data]);
 
 							// prepare return value
 							operand->internals.stringVal.string = title;
@@ -137,14 +138,13 @@ namespace Components
 			pop eax
 
 			cmp eax, 0
-			jz OriginalTitle
+			jz originalTitle
 
 			pop ecx
-			mov ecx, DWORD ptr[esi + 4]
+			mov ecx, dword ptr[esi + 4]
 			retn
 
-		OriginalTitle:
-
+		originalTitle:
 			mov eax, [esi + 50h]
 			cmp eax, 3
 
@@ -157,82 +157,70 @@ namespace Components
 	{
 		std::string list;
 
-		for (int i = 0; i < 18; i++)
+		for (std::size_t i = 0; i < Game::MAX_CLIENTS; ++i)
 		{
-			char playerTitle[18];
+			char playerTitle[18]{};
 
-			if (Game::svs_clients[i].state >= 3)
+			if (Game::svs_clients[i].userinfo[0] != '\0')
 			{
-				strncpy_s(playerTitle, Game::Info_ValueForKey(Game::svs_clients[i].connectInfoString, "customTitle"), 17);
+				strncpy_s(playerTitle, Game::Info_ValueForKey(Game::svs_clients[i].userinfo, "customTitle"), _TRUNCATE);
 			}
 			else
 			{
-				memset(playerTitle, 0, 18);
+				playerTitle[0] = '\0';
 			}
 
-			list.append(Utils::String::VA("\\%s\\%s", std::to_string(i).c_str(), playerTitle));
+			list.append(std::format("\\{}\\{}", i, playerTitle));
 		}
 
-		std::string command = Utils::String::VA("%c customTitles \"%s\"", 21, list.data());
-		Game::SV_GameSendServerCommand(-1, 0, command.data());
+		Game::SV_GameSendServerCommand(-1, Game::SV_CMD_CAN_IGNORE, Utils::String::Format("{:c} customTitles \"{}\"", 21, list));
 	}
 
 	void CardTitles::ParseCustomTitles(const char* msg)
 	{
-		for (int i = 0; i < 18; ++i)
+		for (std::size_t i = 0; i < Game::MAX_CLIENTS; ++i)
 		{
-			const char* playerTitle = Game::Info_ValueForKey(msg, std::to_string(i).c_str());
+			const auto index = std::to_string(i);
+			const auto* playerTitle = Game::Info_ValueForKey(msg, index.data());
 
-			if (playerTitle) CardTitles::CustomTitles[i] = playerTitle;
-			else CardTitles::CustomTitles[i].clear();
+			if (playerTitle[0] == '\0')
+			{
+				CustomTitles[i][0] = '\0';
+			}
+			else
+			{
+				Game::I_strncpyz(CustomTitles[i], playerTitle, sizeof(CustomTitles[0]) / sizeof(char));
+			}
 		}
 	}
 
 	CardTitles::CardTitles()
 	{
-		Dvar::OnInit([]()
+		Events::OnDvarInit([]
 		{
-			CardTitles::CustomTitleDvar = Dvar::Register<const char*>("customtitle", "", Game::dvar_flag::DVAR_FLAG_USERINFO | Game::dvar_flag::DVAR_FLAG_SAVED, "Custom card title");
+			CustomTitle = Dvar::Register<const char*>("customTitle", "", Game::DVAR_USERINFO | Game::DVAR_ARCHIVE, "Custom card title");
 		});
 
-		ServerCommands::OnCommand(21, [](Command::Params* params)
+		std::memset(&CustomTitles, 0, sizeof(char[Game::MAX_CLIENTS][18]));
+
+		ServerCommands::OnCommand(21, [](const Command::Params* params)
 		{
-			if (params->get(1) == "customTitles"s && !Dedicated::IsEnabled())
+			if (std::strcmp(params->get(1), "customTitles") == 0)
 			{
-				if (params->length() == 3)
+				if (params->size() == 3)
 				{
-					CardTitles::ParseCustomTitles(params->get(2));
+					ParseCustomTitles(params->get(2));
 					return true;
 				}
 			}
 
 			return false;
-
 		});
 
-		for (int i = 0; i < ARRAYSIZE(CardTitles::CustomTitles); ++i)
-		{
-			CardTitles::CustomTitles[i].clear();
-		}
-
-		Utils::Hook(0x62EB26, CardTitles::GetPlayerCardClientInfoStub).install()->quick();
+		Utils::Hook(0x62EB26, GetPlayerCardClientInfoStub).install()->quick();
 
 		// Table lookup stuff
-		Utils::Hook(0x62DCC1, CardTitles::TableLookupByRowHookStub).install()->quick();
+		Utils::Hook(0x62DCC1, TableLookupByRowHookStub).install()->quick();
 		Utils::Hook::Nop(0x62DCC6, 1);
-
-        // This is placed here in case the anticheat has been disabled!
-        // This checks specifically for launching the process suspended to inject a dll
-#if !defined(DISABLE_ANTICHEAT)
-        AntiCheat::CheckStartupTime();
-#endif
-	}
-
-	CardTitles::~CardTitles()
-	{
-		for (int i = 0; i < ARRAYSIZE(CardTitles::CustomTitles); ++i)
-		{
-			CardTitles::CustomTitles[i].clear();
-		}
 	}
 }

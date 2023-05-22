@@ -4,12 +4,6 @@
 #define NODE_MAX_NODES_TO_SEND 64
 #define NODE_SEND_RATE 500ms
 
-#ifdef NODE_LOG_MESSAGES
-#define NODE_LOG(x, ...) Logger::Print(x, __VA_ARGS__)
-#else
-#define NODE_LOG(x, ...)
-#endif
-
 namespace Components
 {
 	class Node : public Component
@@ -30,14 +24,13 @@ namespace Components
 			std::optional<Utils::Time::Point> lastRequest;
 			std::optional<Utils::Time::Point> lastResponse;
 
-			bool isValid();
-			bool isDead();
+			[[nodiscard]] bool isValid() const;
+			[[nodiscard]] bool isDead() const;
 
-			bool requiresRequest();
+			[[nodiscard]] bool requiresRequest() const;
 			void sendRequest();
 
 			void reset();
-			json11::Json to_json() const;
 		};
 
 		Node();
@@ -48,16 +41,14 @@ namespace Components
 		static void RunFrame();
 		static void Synchronize();
 
-		static void LoadNodeRemotePreset();
-
 	private:
 		static std::recursive_mutex Mutex;
 		static std::vector<Entry> Nodes;
-		static bool wasIngame;
+		static bool WasIngame;
 
 		static void HandleResponse(Network::Address address, const std::string& data);
 
-		static void SendList(Network::Address address);
+		static void SendList(const Network::Address& address);
 
 		static void LoadNodePreset();
 		static void LoadNodes();
